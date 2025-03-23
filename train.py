@@ -1,208 +1,204 @@
 import os, re, math, json, torch
+import torch.nn as nn
 import torch.nn.functional as F
-from collections import Counter
-from bitsandbytes.optim import Adam8bit
 from torch.utils.data import Dataset, DataLoader, Subset
-from safetensors.torch import save_file, load_file
-from torch import nn
+from safetensors.torch import save_file
+from bitsandbytes.optim import Adam8bit
+from collections import Counter
+from functools import partial
 from tqdm import tqdm
 
-# ===== 工具函數 =====
-def save_json(data, file_path):
-    os.makedirs(os.path.dirname(file_path), exist_ok=True)
-    with open(file_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+# ========== 模型配置 ==========
 
-def load_json(file_path):
-    with open(file_path, "r", encoding="utf-8") as f:
-        return json.load(f)
+config = {
+    "hidden_size": 256,
+    "num_layers": 3,
+    "num_heads": 4,
+    "num_experts": 4,
+    "expert_loss": 0.01,
+    "expert_top_k": 2,
+    "rope_dim": 64,
+    "rope_base": 10000,
+    "forward_dim": 640,
+    "window_size": 512,
+    "split_size": 32000,
+    "length_size": 1024,
+    "split_length": 8,
+    "batch_size": 8,
+    "epochs_size": 30,
+    "val_split": 0.1,
+    "weight_decay": 0.1,
+    "learning_rate": 0.001,
+    "dropout_rate": 0.1,
+    "betas_range": [0.9, 0.999],
+    "allow_bidirect": False,
+    "global_tokens": {
+        "<|padding|>": 0,
+        "<|unknown|>": 1},
+    "special_tokens": {
+        "<|system|>": 2,
+        "<|user|>": 3,
+        "<|think|>": 4,
+        "<|assistant|>": 5,
+        "<|function|>": 6,
+        "<|end|>": 7}
+}
 
-def read_texts(file_path):
-    with open(file_path, encoding="utf-8") as f:
-        return [line.strip() for line in f if line.strip()]
+# ========== 位置編碼 ==========
 
-# ===== 配置類 =====
-class ChatConfig:
-    def __init__(self, vocab_size, max_seq_length, hidden_size=384, num_layers=3, num_heads=6, rope_dim=64, 
-            feed_forward_dim=960, window_size=512, dropout=0.1, num_experts=4, expert_loss_weight=0.01):
-        self.vocab_size = vocab_size
-        self.max_seq_length = max_seq_length
-        self.hidden_size = hidden_size
-        self.num_layers = num_layers
-        self.num_heads = num_heads
-        self.rope_dim = rope_dim
-        self.feed_forward_dim = feed_forward_dim
-        self.window_size = window_size
-        self.dropout = dropout
-        self.num_experts = num_experts
-        self.expert_loss_weight = expert_loss_weight
-
-    def save_pretrained(self, path):
-        os.makedirs(path, exist_ok=True)
-        save_json(self.__dict__, os.path.join(path, "config.json"))
-
-    @classmethod
-    def from_pretrained(cls, path):
-        return cls(**load_json(os.path.join(path, "config.json")))
-
-# ===== ROPE 位置編碼 =====
 class RotaryEmbedding(nn.Module):
-    def __init__(self, rope_dim, max_seq_length=1024, base=10000):
+    def __init__(self):
         super().__init__()
-        self.rope_dim = rope_dim
-        inv_freq = 1.0 / (base ** (torch.arange(0, rope_dim, 2).float() / rope_dim))
+        inv_freq = 1.0 / (config["rope_base"] ** (torch.arange(0, config["rope_dim"], 2).float() / config["rope_dim"]))
         self.register_buffer("inv_freq", inv_freq)
-        positions = torch.arange(max_seq_length, dtype=torch.float)
-        freqs = torch.einsum("i,j->ij", positions, self.inv_freq)
-        self.register_buffer("cos_cache", torch.cos(freqs)[None, None, :, :])
-        self.register_buffer("sin_cache", torch.sin(freqs)[None, None, :, :])
 
-    def forward(self, x):
+    def forward(self, x, offset=0):
         B, num_heads, T, _ = x.shape
-        return self.cos_cache[:, :, :T, :], self.sin_cache[:, :, :T, :]
+        positions = torch.arange(offset, offset + T, dtype=torch.float, device=x.device)
+        freqs = torch.einsum("i,j->ij", positions, self.inv_freq)
+        cos = torch.cos(freqs)[None, None, :, :]
+        sin = torch.sin(freqs)[None, None, :, :]
+        return cos, sin
 
-def apply_rotary(x, cos, sin, rope_dim):
-    x_rot = x[..., :rope_dim].reshape(*x.shape[:-1], rope_dim // 2, 2)
-    x1, x2 = x_rot[..., 0], x_rot[..., 1]
-    x_rotated = torch.stack([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1).reshape(*x.shape[:-1], rope_dim)
-    return torch.cat([x_rotated, x[..., rope_dim:]], dim=-1)
+# ========== 激活函數 ==========
 
-# ===== 正弦位置編碼與漸進式視窗 =====
-class PositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len, dropout=0.1):
-        super().__init__()
-        self.dropout = nn.Dropout(dropout)
-        pe = torch.zeros(max_len, d_model)
-        position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer('pe', pe)
-
-    def forward(self, x):
-        return self.dropout(x + self.pe[:x.size(1)].unsqueeze(0))
-
-    @staticmethod
-    def get_adaptive_causal_mask(T, window_size, device):
-        i = torch.arange(T, device=device).unsqueeze(1)
-        j = torch.arange(T, device=device).unsqueeze(0)
-        mask = (j > i) | ((i - j) >= window_size)
-        return mask
-
-# ===== GEGLU 模塊 =====
 class GEGLU(nn.Module):
-    def __init__(self, hidden_size, feed_forward_dim, dropout):
+    def __init__(self):
         super().__init__()
-        self.fc = nn.Linear(hidden_size, feed_forward_dim * 2)
-        self.out = nn.Linear(feed_forward_dim, hidden_size)
+        self.fc = nn.Linear(config["hidden_size"], config["forward_dim"] * 2)
+        self.out = nn.Linear(config["forward_dim"], config["hidden_size"])
 
     def forward(self, x):
         x1, x2 = self.fc(x).chunk(2, dim=-1)
         return self.out(x1 * F.gelu(x2))
 
-# ===== MoE 前饋專家 =====
+# ========== 前饋專家 ==========
+
 class MoEFeedForward(nn.Module):
-    def __init__(self, hidden_size, expert_dim, dropout, num_experts, top_k=1):
+    def __init__(self):
         super().__init__()
-        self.experts = nn.ModuleList([GEGLU(hidden_size, expert_dim, dropout) for _ in range(num_experts)])
-        self.gate = nn.Linear(hidden_size, num_experts)
-        self.dropout = nn.Dropout(dropout)
-        self.num_experts = num_experts
-        self.top_k = top_k
+        self.experts = nn.ModuleList([GEGLU() for _ in range(config["num_experts"])])
+        self.gate = nn.Linear(config["hidden_size"], config["num_experts"])
+        self.dropout = nn.Dropout(config["dropout_rate"])
 
     def forward(self, x):
-        raw_gate = self.gate(x)
-        gate_values, topk_indices = torch.topk(raw_gate, k=self.top_k, dim=-1)
-        gate_scores = F.softmax(gate_values, dim=-1).squeeze(-1)
-        output = torch.zeros_like(x)
-        expert_usage = torch.zeros(self.num_experts, device=x.device, dtype=x.dtype)
-        for expert_idx in range(self.num_experts):
-            mask = (topk_indices.squeeze(-1) == expert_idx)
-            if mask.any():
-                x_expert = x[mask]
-                expert_out = self.experts[expert_idx](x_expert)
-                output[mask] = expert_out * gate_scores[mask].unsqueeze(-1)
-                expert_usage[expert_idx] = gate_scores[mask].mean()
-        utilization_loss = ((expert_usage - 1.0 / self.num_experts) ** 2).sum() + 1e-8
+        B, seq, d = x.shape
+        gate_probs = F.softmax(self.gate(x), dim=-1)
+        topk_gate_probs, topk_experts = torch.topk(gate_probs, k=config["expert_top_k"], dim=-1)
+        x_flat = x.view(-1, d)
+        topk_gate_probs_flat = topk_gate_probs.view(-1, config["expert_top_k"])
+        topk_experts_flat = topk_experts.view(-1, config["expert_top_k"])
+        expert_output_dim = self.experts[0](x_flat[:1]).shape[-1]
+        output_flat = torch.zeros(x_flat.size(0), expert_output_dim, device=x.device, dtype=x.dtype)
+        unique_experts = torch.unique(topk_experts_flat)
+        scores_sum = torch.zeros(config["num_experts"], device=x.device)
+        counts = torch.zeros(config["num_experts"], device=x.device)
+        for expert_idx in unique_experts.tolist():
+            mask = (topk_experts_flat == expert_idx)
+            token_indices = mask.any(dim=1).nonzero(as_tuple=True)[0]
+            if token_indices.numel() == 0:
+                continue
+            x_expert = x_flat[token_indices]
+            expert_out = self.experts[expert_idx](x_expert)
+            token_topk_gate_probs = topk_gate_probs_flat[token_indices]
+            token_topk_experts = topk_experts_flat[token_indices]
+            expert_mask = (token_topk_experts == expert_idx)
+            token_weights = token_topk_gate_probs.masked_select(expert_mask).view(-1, 1)
+            output_flat.index_add_(0, token_indices, expert_out * token_weights)
+            scores_sum[expert_idx] = token_topk_gate_probs.masked_select(expert_mask).sum()
+            counts[expert_idx] = mask.sum()
+        expert_usage = scores_sum / (counts + 1e-8)
+        utilization_loss = ((expert_usage - 1.0 / config["num_experts"]) ** 2).sum() + 1e-8
+        output = output_flat.view(B, seq, -1)
         return self.dropout(output), utilization_loss
 
-# ===== 自注意力模塊 =====
-class SelfAttention(nn.Module):
-    def __init__(self, config, global_token_indices=None, allow_global_bidirectional=False):
-        super().__init__()
-        self.num_heads = config.num_heads
-        self.head_dim = config.hidden_size // config.num_heads
-        self.rope_dim = config.rope_dim
-        self.qkv_proj = nn.Linear(config.hidden_size, self.num_heads * self.head_dim * 3)
-        self.out_proj = nn.Linear(self.num_heads * self.head_dim, config.hidden_size)
-        self.attn_dropout = nn.Dropout(config.dropout)
-        self.allow_global_bidirectional = allow_global_bidirectional
-        self.global_token_indices = global_token_indices if global_token_indices is not None else [2, 3, 4, 5]
-        nn.init.xavier_normal_(self.qkv_proj.weight)
-        if self.rope_dim > 0:
-            self.rotary_emb = RotaryEmbedding(self.rope_dim, max_seq_length=config.max_seq_length)
+# ========== 注意力塊 ==========
 
-    def forward(self, x, mask=None):
+class SelfAttention(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.head_dim = config["hidden_size"] // config["num_heads"]
+        self.qkv_proj = nn.Linear(config["hidden_size"], config["num_heads"] * self.head_dim * 3)
+        self.out_proj = nn.Linear(config["num_heads"] * self.head_dim, config["hidden_size"])
+        self.attn_dropout = nn.Dropout(config["dropout_rate"])
+        self.register_buffer("global_tokens_indices", torch.tensor(
+            [config["special_tokens"][token] for token in config["special_tokens"].keys()],
+            dtype=torch.long))
+        nn.init.xavier_normal_(self.qkv_proj.weight)
+        if config["rope_dim"] > 0:
+            self.rotary_emb = RotaryEmbedding()
+
+    def forward(self, x, mask=None, input_ids=None, position_offset=0):
         B, T, _ = x.shape
         qkv = self.qkv_proj(x)
-        q, k, v = [t.view(B, T, self.num_heads, self.head_dim).transpose(1, 2) 
-                   for t in torch.chunk(qkv, 3, dim=-1)]
-        if self.rope_dim > 0:
-            cos, sin = self.rotary_emb(q)
-            q = apply_rotary(q, cos, sin, self.rope_dim)
-            k = apply_rotary(k, cos, sin, self.rope_dim)
-        indices = torch.tensor(self.global_token_indices, device=x.device)
-        valid_indices = indices[indices < T]
-        global_mask = torch.zeros(T, dtype=torch.bool, device=x.device)
-        if valid_indices.numel() > 0:
-            global_mask[valid_indices] = True
-        attn_local = torch.matmul(q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        mask_val = torch.finfo(attn_local.dtype).min if attn_local.dtype == torch.float16 else -1e9
+        q, k, v = [t.view(B, T, config["num_heads"], self.head_dim).transpose(1, 2) for t in torch.chunk(qkv, 3, dim=-1)]
+        if config["rope_dim"] > 0:
+            cos, sin = self.rotary_emb(q, offset=position_offset)
+            q = self.apply_rotary(q, cos, sin, config["rope_dim"])
+            k = self.apply_rotary(k, cos, sin, config["rope_dim"])
+        if input_ids is None:
+            global_mask = torch.zeros(B, T, dtype=torch.bool, device=x.device)
+        else:
+            global_mask = torch.isin(input_ids, self.global_tokens_indices)
+        scale = math.sqrt(self.head_dim)
+        logits = torch.matmul(q, k.transpose(-2, -1)) / scale
+        local_logits = logits.clone()
+        mask_val = torch.finfo(local_logits.dtype).min if local_logits.dtype == torch.float16 else -1e9
         if mask is not None:
-            attn_local = attn_local.masked_fill(mask, mask_val)
-        attn_local = self.attn_dropout(torch.softmax(attn_local, dim=-1))
+            local_logits = local_logits.masked_fill(mask, mask_val)
+        attn_local = torch.softmax(local_logits, dim=-1)
+        attn_local = self.attn_dropout(attn_local)
         out_local = torch.matmul(attn_local, v)
-        global_q = q[:, :, global_mask]
-        attn_global = torch.matmul(global_q, k.transpose(-2, -1)) / math.sqrt(self.head_dim)
-        if not self.allow_global_bidirectional:
-            pos = torch.nonzero(global_mask, as_tuple=False).squeeze(-1)
-            row_idx = pos.view(1, 1, -1, 1)
-            col_idx = torch.arange(T, device=x.device).view(1, 1, 1, T)
-            attn_global = attn_global.masked_fill(col_idx > row_idx, mask_val)
-        attn_global = self.attn_dropout(torch.softmax(attn_global, dim=-1))
-        out_local[:, :, global_mask] = torch.matmul(attn_global, v)
-        attn_out = out_local.transpose(1, 2).reshape(B, T, -1)
+        if not config["allow_bidirect"]:
+            causal_mask = torch.arange(T, device=x.device).unsqueeze(0) <= torch.arange(T, device=x.device).unsqueeze(1)
+            causal_mask = causal_mask.unsqueeze(0).unsqueeze(0)
+            global_logits = logits.masked_fill(~causal_mask, mask_val)
+        else:
+            global_logits = logits
+        global_attn = torch.softmax(global_logits, dim=-1)
+        global_attn = self.attn_dropout(global_attn)
+        out_global = torch.matmul(global_attn, v)
+        global_mask_expanded = global_mask.unsqueeze(1).unsqueeze(-1)
+        out_combined = torch.where(global_mask_expanded, out_global, out_local)
+        attn_out = out_combined.transpose(1, 2).reshape(B, T, -1)
         return self.out_proj(attn_out)
 
-# ===== Transformer 塊 =====
-class TransformerBlock(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.norm1 = nn.LayerNorm(config.hidden_size)
-        self.self_attn = SelfAttention(config)
-        self.norm2 = nn.LayerNorm(config.hidden_size)
-        self.ffn = MoEFeedForward(config.hidden_size, config.feed_forward_dim, config.dropout, config.num_experts)
-        self.dropout = nn.Dropout(config.dropout)
+    def apply_rotary(self, x, cos, sin, rope_dim):
+        x_rot = x[..., :rope_dim].reshape(*x.shape[:-1], rope_dim // 2, 2)
+        x1, x2 = x_rot.unbind(dim=-1)
+        x_rotated = torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1).reshape(*x.shape[:-1], rope_dim)
+        return torch.cat([x_rotated, x[..., rope_dim:]], dim=-1)
 
-    def forward(self, x, mask=None):
-        x = x + self.dropout(self.self_attn(self.norm1(x), mask))
+# ========== 變換模塊 ==========
+
+class TransformerBlock(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.norm1 = nn.LayerNorm(config["hidden_size"])
+        self.self_attn = SelfAttention()
+        self.norm2 = nn.LayerNorm(config["hidden_size"])
+        self.ffn = MoEFeedForward()
+        self.dropout = nn.Dropout(config["dropout_rate"])
+
+    def forward(self, x, mask=None, input_ids=None, position_offset=0):
+        x = x + self.dropout(self.self_attn(self.norm1(x), mask, input_ids, position_offset))
         ffn_out, moe_loss = self.ffn(self.norm2(x))
         return x + self.dropout(ffn_out), moe_loss
 
-# ===== 聊天模型 =====
-class ChatModel(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.embed = nn.Embedding(config.vocab_size, config.hidden_size)
-        self.blocks = nn.ModuleList([TransformerBlock(config) for _ in range(config.num_layers)])
-        self.norm = nn.LayerNorm(config.hidden_size)
-        self.lm_head = nn.Linear(config.hidden_size, config.vocab_size)
-        self.config = config
+# ========== 聊天模塊 ==========
 
-    def forward(self, input_ids, attention_mask=None, labels=None):
+class ChatModel(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.embed = nn.Embedding(config["split_size"], config["hidden_size"])
+        self.blocks = nn.ModuleList([TransformerBlock() for _ in range(config["num_layers"])])
+        self.norm = nn.LayerNorm(config["hidden_size"])
+        self.lm_head = nn.Linear(config["hidden_size"], config["split_size"])
+
+    def forward(self, input_ids, attention_mask=None, labels=None, position_offset=0):
         x = self.embed(input_ids)
         B, T, _ = x.size()
-        causal_mask = PositionalEncoding.get_adaptive_causal_mask(T, self.config.window_size, x.device)
+        causal_mask = self.get_adaptive_causal_mask(T, x.device)
         causal_mask = causal_mask.unsqueeze(0).unsqueeze(1)
         if attention_mask is not None:
             pad_mask = (attention_mask == 0).unsqueeze(1).unsqueeze(2).expand(B, 1, T, T)
@@ -211,243 +207,228 @@ class ChatModel(nn.Module):
             mask = causal_mask
         moe_losses = 0
         for block in self.blocks:
-            x, loss = block(x, mask)
+            x, loss = block(x, mask, input_ids, position_offset)
             moe_losses += loss
         moe_losses /= len(self.blocks)
         x = self.norm(x)
         logits = self.lm_head(x)
         loss = None
         if labels is not None:
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=0)
-            loss += self.config.expert_loss_weight * moe_losses
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=config["global_tokens"]["<|padding|>"])
+            loss += config["expert_loss"] * moe_losses
         return {"loss": loss, "logits": logits}
 
-    def save_pretrained(self, path):
-        os.makedirs(path, exist_ok=True)
-        model_to_save = self.module if hasattr(self, 'module') else self
-        save_file(model_to_save.state_dict(), os.path.join(path, "model.safetensors"))
+    def get_adaptive_causal_mask(self, T, device):
+        i = torch.arange(T, device=device).unsqueeze(1)
+        j = torch.arange(T, device=device).unsqueeze(0)
+        mask = (j > i) | ((i - j) >= config["window_size"])
+        return mask
 
-    @classmethod
-    def from_pretrained(cls, model_path, config):
-        state_dict = load_file(os.path.join(model_path, "model.safetensors"))
-        new_state_dict = {k[7:] if k.startswith('module.') else k: v for k, v in state_dict.items()}
-        model = cls(config)
-        model.load_state_dict(new_state_dict)
-        return model
+# ========== 分詞模塊 ==========
 
 class ChatTokenizer:
-    def __init__(self, vocab_path=None, use_bpe=True, split_length=8):
-        self.use_bpe = use_bpe
-        self.split_length = split_length
-        self.vocab = {"<|padding|>": 0, "<|unknown|>": 1, "<|user|>": 2,
-            "<|think|>": 3, "<|assistant|>": 4, "<|end|>": 5, " ": 6, "\\n": 7}
-        self.special_tokens = sorted(self.vocab, key=self.vocab.get)
-        self.pattern = re.compile(
-            f'({"|".join(map(re.escape, self.special_tokens))})'
-            r'|([a-zA-Z]+)|( +)|([0-9])|(_)|([^\s])', re.UNICODE)
-        if vocab_path and os.path.exists(vocab_path):
-            self.load(vocab_path)
-
-    def build_trie(self, candidates):
-        trie = {}
-        for cand in candidates:
-            node = trie
-            for ch in cand:
-                node = node.setdefault(ch, {})
-            node['$'] = True
-        return trie
-
-    def smart_segment_with_trie(self, token, trie):
-        n = len(token)
-        dp = [None] * (n + 1)
-        dp[0] = []
-        for i in range(n):
-            if dp[i] is None:
-                continue
-            node = trie
-            for j in range(i, n):
-                node = node.get(token[j])
-                if node is None:
-                    break
-                if node.get('$'):
-                    new_seg = dp[i] + [token[i:j+1]]
-                    if dp[j+1] is None or len(new_seg) < len(dp[j+1]):
-                        dp[j+1] = new_seg
-            new_seg = dp[i] + [token[i]]
-            if dp[i+1] is None or len(new_seg) < len(dp[i+1]):
-                dp[i+1] = new_seg
-        segmentation = dp[n]
-        return segmentation if segmentation and segmentation != [token] else None
+    def __init__(self):
+        self.split_tokens = {token: i for i, token in enumerate({**config["global_tokens"], **config["special_tokens"]})}
+        escaped_tokens = map(re.escape, config["special_tokens"].keys())
+        self.pattern = re.compile(f'({"|".join(escaped_tokens)})' r'|(\\n)|([a-zA-Z]+)|( )|([0-9])|(_)|([^\s])', re.UNICODE)
 
     def tokenize(self, text):
-        pattern = self.pattern
-        tokens = [m.group() for m in pattern.finditer(text)]
-        if not self.use_bpe:
+        tokens = [m.group() for m in self.pattern.finditer(text)]
+        if not config["split_length"]:
             return tokens
-        candidates = {t for t in tokens if t.isalpha() and len(t) <= self.split_length}
-        trie = self.build_trie(candidates)
-        cache, output = {}, []
+        candidates = {t for t in tokens if t.isalpha() and len(t) <= config["split_length"]}
+        segmenter = CustomSegmenter(candidates)
+        output = []
         for t in tokens:
-            if t.isalpha() and len(t) > self.split_length:
-                seg = cache.setdefault(t, self.smart_segment_with_trie(t, trie))
-                output.extend(seg if seg else [t])
+            if t.isalpha() and len(t) > config["split_length"]:
+                seg = segmenter.segment(t)
+                output.extend(seg if seg is not None else [t])
             else:
                 output.append(t)
         return output
 
-    def convert_tokens_to_ids(self, tokens, update_vocab=True):
-        vocab = self.vocab
-        unk = vocab["<|unknown|>"]
-        if update_vocab:
-            return [vocab.setdefault(t, len(vocab)) for t in tokens]
+    def convert_tokens_to_ids(self, tokens, update_split_tokens=True):
+        unk = self.split_tokens.get("<|unknown|>")
+        if update_split_tokens:
+            ids = []
+            for t in tokens:
+                if t not in self.split_tokens:
+                    self.split_tokens[t] = len(self.split_tokens)
+                ids.append(self.split_tokens[t])
+            return ids
         else:
-            return [vocab.get(t, unk) for t in tokens]
+            return [self.split_tokens.get(t, unk) for t in tokens]
 
-    def build_vocab(self, texts, max_vocab_size=None):
+    def __call__(self, text, length_size=None, truncation=True, padding="max_length", update_split_tokens=False):
+        tokens = self.tokenize(text)
+        ids = self.convert_tokens_to_ids(tokens, update_split_tokens)
+        if truncation and length_size is not None:
+            ids = ids[:length_size]
+        if padding == "length_size" and length_size is not None:
+            pad_id = self.split_tokens.get("<|padding|>")
+            ids += [pad_id] * (length_size - len(ids))
+        mask = [1 if i != self.split_tokens.get("<|padding|>") else 0 for i in ids]
+        return {"input_ids": torch.tensor(ids, dtype=torch.long), "attention_mask": torch.tensor(mask, dtype=torch.long)}
+
+    def build_split_tokens(self, file_path, min_freq=1):
+        with open(file_path, encoding="utf-8") as f:
+            texts = [line.strip() for line in f if line.strip()]
         total_text = 0
         freq = Counter()
-        pbar = tqdm(texts, desc="Tokenizing")
+        pbar = tqdm(texts, desc="[Token 01]", dynamic_ncols=True)
         for text in pbar:
-            for tok in self.tokenize(text):
-                if tok not in self.special_tokens:
-                    freq[tok] += 1
+            tokens = self.tokenize(text)
+            freq.update(t for t in tokens if t not in config["special_tokens"])
             total_text += len(text)
-            pbar.set_postfix({"text": len(text), "texts": total_text, "tokens": len(freq)})
-        tokens_sorted = sorted(freq.items(), key=lambda x: (-x[1], x[0]))
-        if max_vocab_size:
-            tokens_sorted = tokens_sorted[:max_vocab_size - len(self.special_tokens)]
-        self.vocab.update({t: i + len(self.special_tokens) for i, (t, _) in enumerate(tokens_sorted)})
+            pbar.set_postfix({"total": total_text, "token": len(freq)})
+        filtered_tokens = {token: count for token, count in freq.items() if count >= min_freq}
+        tokens_sorted = sorted(filtered_tokens.items(), key=lambda x: x[1], reverse=True)
+        max_new_tokens = config["split_size"] - len(self.split_tokens) if config["split_size"] else None
+        if max_new_tokens is not None:
+            tokens_sorted = tokens_sorted[:max_new_tokens]
+        pbar = tqdm(tokens_sorted, desc="[Token 02]", dynamic_ncols=True)
+        for i, (token, _) in enumerate(pbar):
+            if token not in self.split_tokens:
+                self.split_tokens[token] = len(self.split_tokens)
+                pbar.set_postfix({"text": token, "token": len(self.split_tokens)})
 
-    def __call__(self, text, max_length, truncation=True, padding="max_length", update_vocab=False):
-        tokens = self.tokenize(text)
-        ids = self.convert_tokens_to_ids(tokens, update_vocab)
-        if truncation:
-            ids = ids[:max_length]
-        if padding == "max_length":
-            pad_id = self.vocab["<|padding|>"]
-            ids += [pad_id] * (max_length - len(ids))
-        mask = [1 if i != self.vocab["<|padding|>"] else 0 for i in ids]
-        return {"input_ids": torch.tensor([ids]), "attention_mask": torch.tensor([mask])}
+    def get_split_tokens(self):
+        return self.split_tokens
 
-    def save(self, path):
-        os.makedirs(path, exist_ok=True)
-        data = {"use_bpe": self.use_bpe, "split_length": self.split_length, "vocab": self.vocab}
-        save_json(data, os.path.join(path, "tokenizer.json"))
+    def decode(self, token_ids):
+        inv_tokens = {v: k for k, v in self.split_tokens.items()}
+        tokens = [inv_tokens.get(token_id, "<|unknown|>") for token_id in token_ids]
+        return "".join(tokens)
 
-    def load(self, path):
-        data = load_json(os.path.join(path, "tokenizer.json"))
-        self.vocab = data.get("vocab", self.vocab)
-        self.use_bpe = data.get("use_bpe", True)
-        self.split_length = data.get("split_length", 8)
+# ========== 細分模塊 ==========
 
-    @property
-    def reverse_vocab(self):
-        return {i: t for t, i in self.vocab.items()}
+class CustomSegmenter:
+    def __init__(self, candidates):
+        self.candidates = candidates
+        self.trie = self._build_trie(candidates)
 
-    @classmethod
-    def from_pretrained(cls, path):
-        tokenizer = cls()
-        tokenizer.load(path)
-        return tokenizer
+    def _build_trie(self, candidates):
+        trie = {}
+        for word in candidates:
+            node = trie
+            for char in word:
+                node = node.setdefault(char, {})
+            node['$'] = True
+        return trie
 
-# ===== 數據集 =====
+    def segment(self, token):
+        segments = []
+        i = 0
+        n = len(token)
+        while i < n:
+            node = self.trie
+            found = None
+            j = i
+            while j < n and j - i < config["split_length"] and token[j] in node:
+                node = node[token[j]]
+                if '$' in node:
+                    found = token[i:j+1]
+                j += 1
+            if found is None:
+                segments.append(token[i])
+                i += 1
+            else:
+                segments.append(found)
+                i += len(found)
+        return segments if len(segments) < len(token) else None
+
+# ========== 數據處理 ==========
+
 class ChatDataset(Dataset):
-    def __init__(self, tokenizer, max_length, texts):
-        self.data = [text for text in texts if text and len(tokenizer.tokenize(text)) > 1]
+    def __init__(self, tokenizer, file_path):
+        with open(file_path, encoding="utf-8") as f:
+            texts = [line.strip() for line in f if line.strip()]
         self.tokenizer = tokenizer
-        self.max_length = max_length
+        self.data = texts
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        encoding = self.tokenizer(self.data[idx], self.max_length, update_vocab=False)
+        encoding = self.tokenizer(self.data[idx], config["length_size"] + 1, padding="length_size", update_split_tokens=False)
         input_ids = encoding["input_ids"].squeeze()
-        return {
-            "input_ids": input_ids[:-1],
-            "attention_mask": encoding["attention_mask"].squeeze()[:-1],
-            "labels": input_ids[1:]}
+        return {"input_ids": input_ids[:-1], "attention_mask": encoding["attention_mask"].squeeze()[:-1], "labels": input_ids[1:]}
 
-# ===== 訓練週期 =====
-def run_epoch(model, data_loader, device, pad_id, desc, epoch, optimizer=None, accum_steps=1):
-    total_loss, total_correct, total_tokens = 0, 0, 0
-    scaler = torch.amp.GradScaler(device='cuda') if (optimizer is not None and device.type == "cuda") else None
-    pbar = tqdm(data_loader, desc=desc)
-    for step, batch in enumerate(pbar):
+# ========== 訓練週期 ==========
+
+def run_epoch(model, data_loader, device, pad_id, epoch, optimizer=None):
+    total_loss, total_correct, total_tokens = 0.0, 0, 0
+    if optimizer is not None:
+        scaler = torch.amp.GradScaler()
+        optimizer.zero_grad(set_to_none=True)
+        mode = "Train"
+        lr = optimizer.param_groups[0]["lr"]
+    else:
+        mode = "Valid"
+        lr = 0.0
+    pbar = tqdm(data_loader, desc=f"[{mode} {epoch+1:02d}]", dynamic_ncols=True)
+    for batch in pbar:
         batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
         if optimizer is not None:
-            if scaler is not None:
-                with torch.amp.autocast(device_type='cuda'):
-                    outputs = model(**batch)
-                    loss = outputs["loss"] / accum_steps
-            else:
+            with torch.amp.autocast(device_type="cuda"):
                 outputs = model(**batch)
-                loss = outputs["loss"] / accum_steps
+                loss = outputs["loss"]
             scaler.scale(loss).backward()
-            if (step + 1) % accum_steps == 0:
-                scaler.unscale_(optimizer)
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-                scaler.step(optimizer)
-                scaler.update()
-                optimizer.zero_grad()
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
+            scaler.step(optimizer)
+            scaler.update()
+            optimizer.zero_grad(set_to_none=True)
         else:
             with torch.no_grad():
                 outputs = model(**batch)
                 loss = outputs["loss"]
-        total_loss += loss.item() * (accum_steps if optimizer is not None else 1)
-        preds = outputs["logits"].argmax(dim=-1)
+        total_loss += loss.item()
         mask = batch["labels"] != pad_id
-        total_correct += ((preds == batch["labels"]) * mask).sum().item()
+        correct = ((outputs["logits"].argmax(dim=-1) == batch["labels"]) & mask).sum().item()
+        total_correct += correct
         total_tokens += mask.sum().item()
-        batch_acc = ((preds == batch["labels"]) * mask).sum().item() / mask.sum().item()
-        pbar.set_postfix({"epoch": f"{epoch+1}", "loss": f"{loss.item():.6f}", "acc": f"{batch_acc:.6f}"})
-    return total_loss / len(data_loader), total_correct / total_tokens if total_tokens > 0 else 0
+        acc = correct / mask.sum().item() if mask.sum().item() > 0 else 0.0
+        pbar.set_postfix({"loss": f"{loss.item():.6f}", "acc": f"{acc:.6f}", "lr": f"{lr:.6f}"})
+    return total_loss / len(data_loader), total_correct / total_tokens if total_tokens > 0 else 0.0
 
-# ===== 訓練階段 =====
-def stage_train(stage_name, model, tokenizer, config, file_data, epochs=30, batch_size=4, val_split=0.1):
-    bs = batch_size * (torch.cuda.device_count() if torch.cuda.is_available() else 1)
-    texts = read_texts(file_data)
-    dataset = ChatDataset(tokenizer, config.max_seq_length, texts)
-    indices = torch.randperm(len(dataset)).tolist()
-    split_idx = int(len(dataset) * (1 - val_split))
-    train_data, val_data = Subset(dataset, indices[:split_idx]), Subset(dataset, indices[split_idx:])
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    num_workers = min(8, os.cpu_count() or 1)
+# ========== 訓練階段 ==========
 
-    train_loader = DataLoader(train_data, batch_size=bs, shuffle=True, persistent_workers=True,
-    num_workers=num_workers, pin_memory=True, pin_memory_device=str(device), prefetch_factor=5)
-    val_loader = DataLoader(val_data, batch_size=bs, shuffle=False, persistent_workers=True,
-    num_workers=num_workers, pin_memory=True, pin_memory_device=str(device), prefetch_factor=5)
-    optimizer = Adam8bit(model.parameters(), lr=1e-3, weight_decay=0.1, betas=(0.9, 0.999))
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.7, patience=1)
-    pad_id = tokenizer.vocab["<|padding|>"]
-    original_window = config.window_size
-
-    for epoch in range(epochs):
-        dynamic_window = max(1, int(original_window * (epoch + 1) / epochs))
-        model.config.window_size = dynamic_window
-        model.train()
-        tl, ta = run_epoch(model, train_loader, device, pad_id, f"Training  ", epoch, optimizer)
-        model.eval()
-        vl, va = run_epoch(model, val_loader, device, pad_id, f"Verifying ", epoch)
-        scheduler.step(vl)
-        lr = optimizer.param_groups[0]['lr']
-        save_path = os.path.join("./model", f"{stage_name}_epoch_{epoch+1}")
-        os.makedirs(save_path, exist_ok=True)
-        model.save_pretrained(save_path)
-        tokenizer.save(save_path)
-        config.save_pretrained(save_path)
-
-if __name__ == "__main__":
-    file_data = "./data/dialogues.txt"
+def stage_train(stage_name, file_path):
     tokenizer = ChatTokenizer()
-    tokenizer.build_vocab(read_texts(file_data))
-    config = ChatConfig(vocab_size=len(tokenizer.vocab), max_seq_length=1024)
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    tokenizer.build_split_tokens(file_path)
+    dataset = ChatDataset(tokenizer, file_path)
+    model = ChatModel()
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
-    model = ChatModel(config)
-    if torch.cuda.is_available() and torch.cuda.device_count() > 1:
-        device_ids = list(range(torch.cuda.device_count()))
-        model = nn.DataParallel(model, device_ids=device_ids, output_device=device_ids[0])
-    stage_train("Pretrain", model.to(device), tokenizer, config, file_data)
+    if device.type == "cuda" and torch.cuda.device_count() > 1:
+        model = nn.DataParallel(model)
+    model.to(device)
+    indices = torch.randperm(len(dataset)).tolist()
+    split_idx = int(len(dataset) * (1 - config["val_split"]))
+    num_workers = min(8, os.cpu_count() or 1)
+    pad_id = tokenizer.get_split_tokens()["<|padding|>"]
+    train_loader = DataLoader(Subset(dataset, indices[:split_idx]), batch_size=config["batch_size"], num_workers=num_workers, persistent_workers=True, shuffle=True, pin_memory=True)
+    val_loader = DataLoader(Subset(dataset, indices[split_idx:]), batch_size=config["batch_size"], num_workers=num_workers, persistent_workers=True, shuffle=False, pin_memory=True)
+    optimizer = Adam8bit(model.parameters(), lr=config["learning_rate"], weight_decay=config["weight_decay"], betas=config["betas_range"])
+    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.7, patience=1)
+    for epoch in range(config["epochs_size"]):
+        current_lr = optimizer.param_groups[0]["lr"]
+        model.train()
+        train_loss, train_acc = run_epoch(model, train_loader, device, pad_id, epoch, optimizer)
+        model.eval()
+        val_loss, val_acc = run_epoch(model, val_loader, device, pad_id, epoch)
+        scheduler.step(val_loss)
+        save_path = os.path.join("./model", f"{stage_name}_epoch_{epoch+1}")
+        os.makedirs(save_path, exist_ok=True)
+        with open(os.path.join(save_path, "tokenizer.json"), "w", encoding="utf-8") as f:
+            json.dump(tokenizer.get_split_tokens(), f, indent=4, ensure_ascii=False)
+        with open(os.path.join(save_path, "config.json"), "w", encoding="utf-8") as f:
+            json.dump(config, f, indent=4, ensure_ascii=False)
+        save_file(model.state_dict(), os.path.join(save_path, "model.safetensors"))
+
+# ========== 初始訓練 ==========
+
+if __name__ == "__main__":
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    stage_train("pretrain", "./data/dialogues.txt")
