@@ -3,10 +3,13 @@ from train import *
 
 # ========== 預測對話 ==========
 
-def generate_response(model, tokenizer, prompt, max_length=1024, temperature=0.7, repetition_penalty=1.2, presence_penalty=-1.0):
-    encoding = tokenizer(f"<|user|>{prompt}<|assistant|>")
-    generated = encoding["input_ids"].unsqueeze(0).to(device)
+def generate_response(model, tokenizer, prompt, max_length=2048, temperature=0.7, repetition_penalty=1.2, presence_penalty=-1.0):
+    encoded = tokenizer(f"<|user|>{prompt}<|assistant|>")
+    generated = encoded["input_ids"].unsqueeze(0).to(device)
     print("\nAssistant: ", end="", flush=True)
+    unknown_id = tokenizer.split_tokens.get("<|unknown|>")
+    end_id = tokenizer.split_tokens.get("<|end|>")
+    newline_id = tokenizer.split_tokens.get("\\n")
     with torch.no_grad():
         while generated.size(1) < max_length:
             if generated.size(1) > config["window_size"]:
@@ -16,31 +19,29 @@ def generate_response(model, tokenizer, prompt, max_length=1024, temperature=0.7
                 current_input = generated
                 pos_offset = 0
             outputs = model(current_input, position_offset=pos_offset)
-            logits = outputs["logits"]
-            next_token_logits = logits[0, -1, :]
-            for token_id in set(generated.squeeze().tolist()):
-                if next_token_logits[token_id] < 0:
-                    next_token_logits[token_id] *= repetition_penalty
-                else:
-                    next_token_logits[token_id] /= repetition_penalty
-            generated_set = set(generated.squeeze().tolist())
-            vocab_size = next_token_logits.shape[0]
-            mask = torch.tensor([token_id not in generated_set for token_id in range(vocab_size)], device=next_token_logits.device)
-            next_token_logits[mask] += presence_penalty
-            next_token_logits = next_token_logits / temperature
-            probabilities = torch.softmax(next_token_logits, dim=-1)
-            next_token = torch.multinomial(probabilities, num_samples=1)
+            logits = outputs["logits"][0, -1, :]
+            gen_tokens = set(generated.squeeze().tolist())
+            for token in gen_tokens:
+                logits[token] = logits[token] * repetition_penalty if logits[token] < 0 else logits[token] / repetition_penalty
+            vocab_size = logits.shape[0]
+            mask = torch.tensor([token not in gen_tokens for token in range(vocab_size)], device=logits.device)
+            logits[mask] += presence_penalty
+            probs = torch.softmax(logits / temperature, dim=-1)
+            next_token = torch.multinomial(probs, num_samples=1)
             token_id = next_token.item()
+            if token_id == unknown_id:
+                probs[unknown_id] = 0.0
+                if probs.sum() > 0:
+                    probs /= probs.sum()
+                    token_id = torch.multinomial(probs, num_samples=1).item()
             generated = torch.cat((generated, next_token.unsqueeze(0)), dim=1)
             token_str = tokenizer.decode([token_id])
-            if token_id == tokenizer.split_tokens.get("<|end|>"):
-                print("\n", end="", flush=True)
+            if token_id == end_id:
                 break
-            elif token_id == tokenizer.split_tokens.get("\\n"):
-                print("\n", end="", flush=True)
+            elif token_id == newline_id:
+                print("\n", end="")
             else:
                 print(token_str, end="", flush=True)
-    print(f"\nTokens: {generated.size(1)}")
 
 # ========== 初始預測 ==========
 
@@ -64,3 +65,4 @@ if __name__ == "__main__":
         if prompt.strip().lower() in ["exit", "quit"]:
             break
         response = generate_response(model, tokenizer, prompt)
+        print("\n", end="")

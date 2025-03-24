@@ -12,26 +12,24 @@ from tqdm import tqdm
 
 config = {
     "hidden_size": 256,
-    "num_layers": 3,
+    "num_layers": 2,
     "num_heads": 4,
-    "num_experts": 4,
+    "num_experts": 3,
     "expert_loss": 0.01,
-    "expert_top_k": 2,
     "rope_dim": 64,
     "rope_base": 10000,
     "forward_dim": 640,
     "window_size": 512,
     "split_size": 32000,
     "length_size": 1024,
-    "split_length": 8,
+    "split_length": 5,
     "batch_size": 8,
     "epochs_size": 30,
-    "val_split": 0.1,
+    "split_valid": 0.1,
     "weight_decay": 0.1,
-    "learning_rate": 0.001,
     "dropout_rate": 0.1,
+    "learning_rate": 0.001,
     "betas_range": [0.9, 0.999],
-    "allow_bidirect": False,
     "global_tokens": {
         "<|padding|>": 0,
         "<|unknown|>": 1},
@@ -43,6 +41,93 @@ config = {
         "<|function|>": 6,
         "<|end|>": 7}
 }
+
+# ========== 前饋專家 ==========
+
+class MoEFeedForward(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.experts = nn.ModuleList([GEGLU() for _ in range(config["num_experts"])])
+        self.gate = nn.Linear(config["hidden_size"], config["num_experts"])
+        self.dropout = nn.Dropout(config["dropout_rate"])
+
+    def forward(self, x):
+        B, seq, d = x.shape
+        gate_logits = self.gate(x)
+        gate_probs = F.softmax(gate_logits, dim=-1)
+        expert_weights, expert_indices = torch.max(gate_probs, dim=-1)
+        x_flat = x.view(-1, d)
+        expert_indices_flat = expert_indices.view(-1)
+        expert_weights_flat = expert_weights.view(-1)
+        expert_output_dim = self.experts[0](x_flat[:1]).shape[-1]
+        output_flat = torch.zeros(x_flat.size(0), expert_output_dim, device=x.device, dtype=x.dtype)
+        scores_sum = torch.zeros(config["num_experts"], device=x.device)
+        counts = torch.zeros(config["num_experts"], device=x.device)
+        for expert_idx in range(config["num_experts"]):
+            token_mask = (expert_indices_flat == expert_idx)
+            token_indices = torch.where(token_mask)[0]
+            if token_indices.numel() == 0:
+                continue
+            expert_input = x_flat[token_indices]
+            expert_output = self.experts[expert_idx](expert_input)
+            output_flat[token_indices] = expert_output * expert_weights_flat[token_indices].unsqueeze(1)
+            scores_sum[expert_idx] += expert_weights_flat[token_indices].sum()
+            counts[expert_idx] += token_indices.numel()
+        expert_usage = scores_sum / (counts + 1e-8)
+        utilization_loss = ((expert_usage - 1.0 / config["num_experts"]) ** 2).sum()
+        output = output_flat.view(B, seq, -1)
+        return self.dropout(output), utilization_loss
+
+# ========== 注意力塊 ==========
+
+class SelfAttention(nn.Module):
+    def __init__(self):
+        super().__init__()
+        self.head_dim = config["hidden_size"] // config["num_heads"]
+        self.qkv_proj = nn.Linear(config["hidden_size"], 3 * config["num_heads"] * self.head_dim)
+        self.out_proj = nn.Linear(config["num_heads"] * self.head_dim, config["hidden_size"])
+        self.attn_dropout = nn.Dropout(config["dropout_rate"])
+        self.register_buffer("global_tokens_indices", torch.tensor(
+            [v for v in config["special_tokens"].values()], dtype=torch.long))
+        if config["rope_dim"] > 0:
+            self.rotary_emb = RotaryEmbedding()
+        nn.init.xavier_normal_(self.qkv_proj.weight)
+
+    def forward(self, x, mask=None, input_ids=None, position_offset=0):
+        B, T, _ = x.shape
+        qkv = self.qkv_proj(x)
+        q, k, v = qkv.chunk(3, dim=-1)
+        q = q.view(B, T, config["num_heads"], self.head_dim).transpose(1, 2)
+        k = k.view(B, T, config["num_heads"], self.head_dim).transpose(1, 2)
+        v = v.view(B, T, config["num_heads"], self.head_dim).transpose(1, 2)
+        if config["rope_dim"] > 0:
+            cos, sin = self.rotary_emb(q, offset=position_offset)
+            q = self.apply_rotary(q, cos, sin)
+            k = self.apply_rotary(k, cos, sin)
+        causal_mask = torch.ones(T, T, device=x.device, dtype=torch.bool).tril().view(1, 1, T, T)
+        if input_ids is not None:
+            global_mask = torch.isin(input_ids, self.global_tokens_indices)
+            causal_mask = causal_mask | global_mask.view(B, 1, T, 1)
+        scale = math.sqrt(self.head_dim)
+        attn_logits = (q @ k.transpose(-2, -1)) / scale
+        attn_logits = attn_logits.masked_fill(~causal_mask, -torch.finfo(q.dtype).max)
+        if mask is not None:
+            attn_logits = attn_logits.masked_fill(mask, -torch.finfo(q.dtype).max)
+        attn_weights = torch.softmax(attn_logits, dim=-1)
+        attn_weights = self.attn_dropout(attn_weights)
+        attn_output = (attn_weights @ v).transpose(1, 2).reshape(B, T, -1)
+        return self.out_proj(attn_output)
+
+    def apply_rotary(self, x, cos, sin):
+        if config["rope_dim"] == 0:
+            return x
+        x_rot = x[..., :config["rope_dim"]]
+        x_pass = x[..., config["rope_dim"]:]
+        x1, x2 = x_rot.chunk(2, dim=-1)
+        x1_new = x1 * cos - x2 * sin
+        x2_new = x1 * sin + x2 * cos
+        x_rot = torch.cat((x1_new, x2_new), dim=-1)
+        return torch.cat((x_rot, x_pass), dim=-1)
 
 # ========== 位置編碼 ==========
 
@@ -71,103 +156,6 @@ class GEGLU(nn.Module):
     def forward(self, x):
         x1, x2 = self.fc(x).chunk(2, dim=-1)
         return self.out(x1 * F.gelu(x2))
-
-# ========== 前饋專家 ==========
-
-class MoEFeedForward(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.experts = nn.ModuleList([GEGLU() for _ in range(config["num_experts"])])
-        self.gate = nn.Linear(config["hidden_size"], config["num_experts"])
-        self.dropout = nn.Dropout(config["dropout_rate"])
-
-    def forward(self, x):
-        B, seq, d = x.shape
-        gate_probs = F.softmax(self.gate(x), dim=-1)
-        topk_gate_probs, topk_experts = torch.topk(gate_probs, k=config["expert_top_k"], dim=-1)
-        x_flat = x.view(-1, d)
-        topk_gate_probs_flat = topk_gate_probs.view(-1, config["expert_top_k"])
-        topk_experts_flat = topk_experts.view(-1, config["expert_top_k"])
-        expert_output_dim = self.experts[0](x_flat[:1]).shape[-1]
-        output_flat = torch.zeros(x_flat.size(0), expert_output_dim, device=x.device, dtype=x.dtype)
-        unique_experts = torch.unique(topk_experts_flat)
-        scores_sum = torch.zeros(config["num_experts"], device=x.device)
-        counts = torch.zeros(config["num_experts"], device=x.device)
-        for expert_idx in unique_experts.tolist():
-            mask = (topk_experts_flat == expert_idx)
-            token_indices = mask.any(dim=1).nonzero(as_tuple=True)[0]
-            if token_indices.numel() == 0:
-                continue
-            x_expert = x_flat[token_indices]
-            expert_out = self.experts[expert_idx](x_expert)
-            token_topk_gate_probs = topk_gate_probs_flat[token_indices]
-            token_topk_experts = topk_experts_flat[token_indices]
-            expert_mask = (token_topk_experts == expert_idx)
-            token_weights = token_topk_gate_probs.masked_select(expert_mask).view(-1, 1)
-            output_flat.index_add_(0, token_indices, expert_out * token_weights)
-            scores_sum[expert_idx] = token_topk_gate_probs.masked_select(expert_mask).sum()
-            counts[expert_idx] = mask.sum()
-        expert_usage = scores_sum / (counts + 1e-8)
-        utilization_loss = ((expert_usage - 1.0 / config["num_experts"]) ** 2).sum() + 1e-8
-        output = output_flat.view(B, seq, -1)
-        return self.dropout(output), utilization_loss
-
-# ========== 注意力塊 ==========
-
-class SelfAttention(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.head_dim = config["hidden_size"] // config["num_heads"]
-        self.qkv_proj = nn.Linear(config["hidden_size"], config["num_heads"] * self.head_dim * 3)
-        self.out_proj = nn.Linear(config["num_heads"] * self.head_dim, config["hidden_size"])
-        self.attn_dropout = nn.Dropout(config["dropout_rate"])
-        self.register_buffer("global_tokens_indices", torch.tensor(
-            [config["special_tokens"][token] for token in config["special_tokens"].keys()],
-            dtype=torch.long))
-        nn.init.xavier_normal_(self.qkv_proj.weight)
-        if config["rope_dim"] > 0:
-            self.rotary_emb = RotaryEmbedding()
-
-    def forward(self, x, mask=None, input_ids=None, position_offset=0):
-        B, T, _ = x.shape
-        qkv = self.qkv_proj(x)
-        q, k, v = [t.view(B, T, config["num_heads"], self.head_dim).transpose(1, 2) for t in torch.chunk(qkv, 3, dim=-1)]
-        if config["rope_dim"] > 0:
-            cos, sin = self.rotary_emb(q, offset=position_offset)
-            q = self.apply_rotary(q, cos, sin, config["rope_dim"])
-            k = self.apply_rotary(k, cos, sin, config["rope_dim"])
-        if input_ids is None:
-            global_mask = torch.zeros(B, T, dtype=torch.bool, device=x.device)
-        else:
-            global_mask = torch.isin(input_ids, self.global_tokens_indices)
-        scale = math.sqrt(self.head_dim)
-        logits = torch.matmul(q, k.transpose(-2, -1)) / scale
-        local_logits = logits.clone()
-        mask_val = torch.finfo(local_logits.dtype).min if local_logits.dtype == torch.float16 else -1e9
-        if mask is not None:
-            local_logits = local_logits.masked_fill(mask, mask_val)
-        attn_local = torch.softmax(local_logits, dim=-1)
-        attn_local = self.attn_dropout(attn_local)
-        out_local = torch.matmul(attn_local, v)
-        if not config["allow_bidirect"]:
-            causal_mask = torch.arange(T, device=x.device).unsqueeze(0) <= torch.arange(T, device=x.device).unsqueeze(1)
-            causal_mask = causal_mask.unsqueeze(0).unsqueeze(0)
-            global_logits = logits.masked_fill(~causal_mask, mask_val)
-        else:
-            global_logits = logits
-        global_attn = torch.softmax(global_logits, dim=-1)
-        global_attn = self.attn_dropout(global_attn)
-        out_global = torch.matmul(global_attn, v)
-        global_mask_expanded = global_mask.unsqueeze(1).unsqueeze(-1)
-        out_combined = torch.where(global_mask_expanded, out_global, out_local)
-        attn_out = out_combined.transpose(1, 2).reshape(B, T, -1)
-        return self.out_proj(attn_out)
-
-    def apply_rotary(self, x, cos, sin, rope_dim):
-        x_rot = x[..., :rope_dim].reshape(*x.shape[:-1], rope_dim // 2, 2)
-        x1, x2 = x_rot.unbind(dim=-1)
-        x_rotated = torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1).reshape(*x.shape[:-1], rope_dim)
-        return torch.cat([x_rotated, x[..., rope_dim:]], dim=-1)
 
 # ========== 變換模塊 ==========
 
@@ -405,7 +393,7 @@ def stage_train(stage_name, file_path):
         model = nn.DataParallel(model)
     model.to(device)
     indices = torch.randperm(len(dataset)).tolist()
-    split_idx = int(len(dataset) * (1 - config["val_split"]))
+    split_idx = int(len(dataset) * (1 - config["split_valid"]))
     num_workers = min(8, os.cpu_count() or 1)
     pad_id = tokenizer.get_split_tokens()["<|padding|>"]
     train_loader = DataLoader(Subset(dataset, indices[:split_idx]), batch_size=config["batch_size"], num_workers=num_workers, persistent_workers=True, shuffle=True, pin_memory=True)
@@ -413,7 +401,6 @@ def stage_train(stage_name, file_path):
     optimizer = Adam8bit(model.parameters(), lr=config["learning_rate"], weight_decay=config["weight_decay"], betas=config["betas_range"])
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.7, patience=1)
     for epoch in range(config["epochs_size"]):
-        current_lr = optimizer.param_groups[0]["lr"]
         model.train()
         train_loss, train_acc = run_epoch(model, train_loader, device, pad_id, epoch, optimizer)
         model.eval()
