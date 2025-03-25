@@ -10,7 +10,7 @@ from tqdm import tqdm
 
 # ========== 模型配置 ==========
 
-config = {
+default_config = {
     "hidden_size": 256,
     "num_layers": 2,
     "num_heads": 4,
@@ -20,10 +20,9 @@ config = {
     "rope_base": 10000,
     "forward_dim": 640,
     "window_size": 512,
-    "split_size": 32000,
+    "split_size": 6000,
     "length_size": 1024,
-    "split_length": 5,
-    "batch_size": 8,
+    "batch_size": 32,
     "epochs_size": 30,
     "split_valid": 0.1,
     "weight_decay": 0.1,
@@ -45,9 +44,10 @@ config = {
 # ========== 前饋專家 ==========
 
 class MoEFeedForward(nn.Module):
-    def __init__(self):
+    def __init__(self, config):
         super().__init__()
-        self.experts = nn.ModuleList([GEGLU() for _ in range(config["num_experts"])])
+        self.config = config
+        self.experts = nn.ModuleList([GEGLU(config) for _ in range(config["num_experts"])])
         self.gate = nn.Linear(config["hidden_size"], config["num_experts"])
         self.dropout = nn.Dropout(config["dropout_rate"])
 
@@ -61,9 +61,9 @@ class MoEFeedForward(nn.Module):
         expert_weights_flat = expert_weights.view(-1)
         expert_output_dim = self.experts[0](x_flat[:1]).shape[-1]
         output_flat = torch.zeros(x_flat.size(0), expert_output_dim, device=x.device, dtype=x.dtype)
-        scores_sum = torch.zeros(config["num_experts"], device=x.device)
-        counts = torch.zeros(config["num_experts"], device=x.device)
-        for expert_idx in range(config["num_experts"]):
+        scores_sum = torch.zeros(self.config["num_experts"], device=x.device)
+        counts = torch.zeros(self.config["num_experts"], device=x.device)
+        for expert_idx in range(self.config["num_experts"]):
             token_mask = (expert_indices_flat == expert_idx)
             token_indices = torch.where(token_mask)[0]
             if token_indices.numel() == 0:
@@ -74,15 +74,16 @@ class MoEFeedForward(nn.Module):
             scores_sum[expert_idx] += expert_weights_flat[token_indices].sum()
             counts[expert_idx] += token_indices.numel()
         expert_usage = scores_sum / (counts + 1e-8)
-        utilization_loss = ((expert_usage - 1.0 / config["num_experts"]) ** 2).sum()
+        utilization_loss = ((expert_usage - 1.0 / self.config["num_experts"]) ** 2).sum()
         output = output_flat.view(B, seq, -1)
         return self.dropout(output), utilization_loss
 
 # ========== 注意力塊 ==========
 
 class SelfAttention(nn.Module):
-    def __init__(self):
+    def __init__(self, config):
         super().__init__()
+        self.config = config
         self.head_dim = config["hidden_size"] // config["num_heads"]
         self.qkv_proj = nn.Linear(config["hidden_size"], 3 * config["num_heads"] * self.head_dim)
         self.out_proj = nn.Linear(config["num_heads"] * self.head_dim, config["hidden_size"])
@@ -90,17 +91,17 @@ class SelfAttention(nn.Module):
         self.register_buffer("global_tokens_indices", torch.tensor(
             [v for v in config["special_tokens"].values()], dtype=torch.long))
         if config["rope_dim"] > 0:
-            self.rotary_emb = RotaryEmbedding()
+            self.rotary_emb = RotaryEmbedding(config)
         nn.init.xavier_normal_(self.qkv_proj.weight)
 
     def forward(self, x, mask=None, input_ids=None, position_offset=0):
         B, T, _ = x.shape
         qkv = self.qkv_proj(x)
         q, k, v = qkv.chunk(3, dim=-1)
-        q = q.view(B, T, config["num_heads"], self.head_dim).transpose(1, 2)
-        k = k.view(B, T, config["num_heads"], self.head_dim).transpose(1, 2)
-        v = v.view(B, T, config["num_heads"], self.head_dim).transpose(1, 2)
-        if config["rope_dim"] > 0:
+        q = q.view(B, T, self.config["num_heads"], self.head_dim).transpose(1, 2)
+        k = k.view(B, T, self.config["num_heads"], self.head_dim).transpose(1, 2)
+        v = v.view(B, T, self.config["num_heads"], self.head_dim).transpose(1, 2)
+        if self.config["rope_dim"] > 0:
             cos, sin = self.rotary_emb(q, offset=position_offset)
             q = self.apply_rotary(q, cos, sin)
             k = self.apply_rotary(k, cos, sin)
@@ -119,10 +120,10 @@ class SelfAttention(nn.Module):
         return self.out_proj(attn_output)
 
     def apply_rotary(self, x, cos, sin):
-        if config["rope_dim"] == 0:
+        if self.config["rope_dim"] == 0:
             return x
-        x_rot = x[..., :config["rope_dim"]]
-        x_pass = x[..., config["rope_dim"]:]
+        x_rot = x[..., :self.config["rope_dim"]]
+        x_pass = x[..., self.config["rope_dim"]:]
         x1, x2 = x_rot.chunk(2, dim=-1)
         x1_new = x1 * cos - x2 * sin
         x2_new = x1 * sin + x2 * cos
@@ -132,8 +133,9 @@ class SelfAttention(nn.Module):
 # ========== 位置編碼 ==========
 
 class RotaryEmbedding(nn.Module):
-    def __init__(self):
+    def __init__(self, config):
         super().__init__()
+        self.config = config
         inv_freq = 1.0 / (config["rope_base"] ** (torch.arange(0, config["rope_dim"], 2).float() / config["rope_dim"]))
         self.register_buffer("inv_freq", inv_freq)
 
@@ -148,8 +150,9 @@ class RotaryEmbedding(nn.Module):
 # ========== 激活函數 ==========
 
 class GEGLU(nn.Module):
-    def __init__(self):
+    def __init__(self, config):
         super().__init__()
+        self.config = config
         self.fc = nn.Linear(config["hidden_size"], config["forward_dim"] * 2)
         self.out = nn.Linear(config["forward_dim"], config["hidden_size"])
 
@@ -160,12 +163,13 @@ class GEGLU(nn.Module):
 # ========== 變換模塊 ==========
 
 class TransformerBlock(nn.Module):
-    def __init__(self):
+    def __init__(self, config):
         super().__init__()
+        self.config = config
         self.norm1 = nn.LayerNorm(config["hidden_size"])
-        self.self_attn = SelfAttention()
+        self.self_attn = SelfAttention(config)
         self.norm2 = nn.LayerNorm(config["hidden_size"])
-        self.ffn = MoEFeedForward()
+        self.ffn = MoEFeedForward(config)
         self.dropout = nn.Dropout(config["dropout_rate"])
 
     def forward(self, x, mask=None, input_ids=None, position_offset=0):
@@ -176,10 +180,11 @@ class TransformerBlock(nn.Module):
 # ========== 聊天模塊 ==========
 
 class ChatModel(nn.Module):
-    def __init__(self):
+    def __init__(self, config):
         super().__init__()
+        self.config = config
         self.embed = nn.Embedding(config["split_size"], config["hidden_size"])
-        self.blocks = nn.ModuleList([TransformerBlock() for _ in range(config["num_layers"])])
+        self.blocks = nn.ModuleList([TransformerBlock(config) for _ in range(config["num_layers"])])
         self.norm = nn.LayerNorm(config["hidden_size"])
         self.lm_head = nn.Linear(config["hidden_size"], config["split_size"])
 
@@ -202,42 +207,31 @@ class ChatModel(nn.Module):
         logits = self.lm_head(x)
         loss = None
         if labels is not None:
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=config["global_tokens"]["<|padding|>"])
-            loss += config["expert_loss"] * moe_losses
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=self.config["global_tokens"]["<|padding|>"])
+            loss += self.config["expert_loss"] * moe_losses
         return {"loss": loss, "logits": logits}
 
     def get_adaptive_causal_mask(self, T, device):
         i = torch.arange(T, device=device).unsqueeze(1)
         j = torch.arange(T, device=device).unsqueeze(0)
-        mask = (j > i) | ((i - j) >= config["window_size"])
+        mask = (j > i) | ((i - j) >= self.config["window_size"])
         return mask
 
 # ========== 分詞模塊 ==========
 
 class ChatTokenizer:
-    def __init__(self):
+    def __init__(self, config):
+        self.config = config
         self.split_tokens = {token: i for i, token in enumerate({**config["global_tokens"], **config["special_tokens"]})}
         escaped_tokens = map(re.escape, config["special_tokens"].keys())
-        self.pattern = re.compile(f'({"|".join(escaped_tokens)})' r'|(\\n)|([a-zA-Z]+)|( )|([0-9])|(_)|([^\s])', re.UNICODE)
+        self.pattern = re.compile(f'({"|".join(escaped_tokens)})|(\\n)|([a-zA-Z]+)|( )|([0-9])|(_)|([^\\s])', re.UNICODE)
 
-    def tokenize(self, text):
-        tokens = [m.group() for m in self.pattern.finditer(text)]
-        if not config["split_length"]:
-            return tokens
-        candidates = {t for t in tokens if t.isalpha() and len(t) <= config["split_length"]}
-        segmenter = CustomSegmenter(candidates)
-        output = []
-        for t in tokens:
-            if t.isalpha() and len(t) > config["split_length"]:
-                seg = segmenter.segment(t)
-                output.extend(seg if seg is not None else [t])
-            else:
-                output.append(t)
-        return output
+    def tokenize(self, texts):
+        return [m.group() for m in self.pattern.finditer(texts)]
 
-    def convert_tokens_to_ids(self, tokens, update_split_tokens=True):
+    def convert_tokens_to_ids(self, tokens, update_tokens=True):
         unk = self.split_tokens.get("<|unknown|>")
-        if update_split_tokens:
+        if update_tokens:
             ids = []
             for t in tokens:
                 if t not in self.split_tokens:
@@ -247,38 +241,37 @@ class ChatTokenizer:
         else:
             return [self.split_tokens.get(t, unk) for t in tokens]
 
-    def __call__(self, text, length_size=None, truncation=True, padding="max_length", update_split_tokens=False):
+    def __call__(self, text, length_size=None, truncation=True, update_tokens=False, padding="max_length"):
         tokens = self.tokenize(text)
-        ids = self.convert_tokens_to_ids(tokens, update_split_tokens)
+        ids = self.convert_tokens_to_ids(tokens, update_tokens)
         if truncation and length_size is not None:
             ids = ids[:length_size]
         if padding == "length_size" and length_size is not None:
             pad_id = self.split_tokens.get("<|padding|>")
             ids += [pad_id] * (length_size - len(ids))
         mask = [1 if i != self.split_tokens.get("<|padding|>") else 0 for i in ids]
-        return {"input_ids": torch.tensor(ids, dtype=torch.long), "attention_mask": torch.tensor(mask, dtype=torch.long)}
+        return {"input_ids": torch.tensor(ids, dtype=torch.long),
+                "attention_mask": torch.tensor(mask, dtype=torch.long)}
 
-    def build_split_tokens(self, file_path, min_freq=1):
-        with open(file_path, encoding="utf-8") as f:
-            texts = [line.strip() for line in f if line.strip()]
-        total_text = 0
+    def build_split_tokens(self, stages, min_freq=1):
+        texts = []
+        for file in stages:
+            with open(file["file_path"], encoding="utf-8") as f:
+                texts.extend(f.read().splitlines())
         freq = Counter()
-        pbar = tqdm(texts, desc="[Token 01]", dynamic_ncols=True)
+        pbar = tqdm(texts, desc=f"[Tokenize]", dynamic_ncols=True)
         for text in pbar:
             tokens = self.tokenize(text)
-            freq.update(t for t in tokens if t not in config["special_tokens"])
-            total_text += len(text)
-            pbar.set_postfix({"total": total_text, "token": len(freq)})
+            freq.update(t for t in tokens if t not in self.config["special_tokens"])
+            pbar.set_postfix({"tokens": len(tokens), "total": len(freq)})
         filtered_tokens = {token: count for token, count in freq.items() if count >= min_freq}
         tokens_sorted = sorted(filtered_tokens.items(), key=lambda x: x[1], reverse=True)
-        max_new_tokens = config["split_size"] - len(self.split_tokens) if config["split_size"] else None
+        max_new_tokens = self.config["split_size"] - len(self.split_tokens) if self.config["split_size"] else None
         if max_new_tokens is not None:
             tokens_sorted = tokens_sorted[:max_new_tokens]
-        pbar = tqdm(tokens_sorted, desc="[Token 02]", dynamic_ncols=True)
-        for i, (token, _) in enumerate(pbar):
+        for i, (token, _) in enumerate(tokens_sorted):
             if token not in self.split_tokens:
                 self.split_tokens[token] = len(self.split_tokens)
-                pbar.set_postfix({"text": token, "token": len(self.split_tokens)})
 
     def get_split_tokens(self):
         return self.split_tokens
@@ -288,57 +281,21 @@ class ChatTokenizer:
         tokens = [inv_tokens.get(token_id, "<|unknown|>") for token_id in token_ids]
         return "".join(tokens)
 
-# ========== 細分模塊 ==========
-
-class CustomSegmenter:
-    def __init__(self, candidates):
-        self.candidates = candidates
-        self.trie = self._build_trie(candidates)
-
-    def _build_trie(self, candidates):
-        trie = {}
-        for word in candidates:
-            node = trie
-            for char in word:
-                node = node.setdefault(char, {})
-            node['$'] = True
-        return trie
-
-    def segment(self, token):
-        segments = []
-        i = 0
-        n = len(token)
-        while i < n:
-            node = self.trie
-            found = None
-            j = i
-            while j < n and j - i < config["split_length"] and token[j] in node:
-                node = node[token[j]]
-                if '$' in node:
-                    found = token[i:j+1]
-                j += 1
-            if found is None:
-                segments.append(token[i])
-                i += 1
-            else:
-                segments.append(found)
-                i += len(found)
-        return segments if len(segments) < len(token) else None
-
 # ========== 數據處理 ==========
 
 class ChatDataset(Dataset):
-    def __init__(self, tokenizer, file_path):
+    def __init__(self, tokenizer, file_path, config):
         with open(file_path, encoding="utf-8") as f:
             texts = [line.strip() for line in f if line.strip()]
         self.tokenizer = tokenizer
         self.data = texts
+        self.config = config
 
     def __len__(self):
         return len(self.data)
 
     def __getitem__(self, idx):
-        encoding = self.tokenizer(self.data[idx], config["length_size"] + 1, padding="length_size", update_split_tokens=False)
+        encoding = self.tokenizer(self.data[idx], self.config["length_size"] + 1, padding="length_size", update_tokens=False)
         input_ids = encoding["input_ids"].squeeze()
         return {"input_ids": input_ids[:-1], "attention_mask": encoding["attention_mask"].squeeze()[:-1], "labels": input_ids[1:]}
 
@@ -380,42 +337,52 @@ def run_epoch(model, data_loader, device, pad_id, epoch, optimizer=None):
         pbar.set_postfix({"loss": f"{loss.item():.6f}", "acc": f"{acc:.6f}", "lr": f"{lr:.6f}"})
     return total_loss / len(data_loader), total_correct / total_tokens if total_tokens > 0 else 0.0
 
-# ========== 訓練階段 ==========
+# ========== 階段訓練 ==========
 
-def stage_train(stage_name, file_path):
-    tokenizer = ChatTokenizer()
-    tokenizer.build_split_tokens(file_path)
-    dataset = ChatDataset(tokenizer, file_path)
-    model = ChatModel()
-    torch.backends.cudnn.benchmark = True
-    torch.backends.cuda.matmul.allow_tf32 = True
+def stage_train(stages, config):
+    print(f"\n========== Tokenizer ==========\n")
+    tokenizer = ChatTokenizer(config)
+    tokenizer.build_split_tokens(stages)
+    pad_id = tokenizer.get_split_tokens()["<|padding|>"]
+
+    model = ChatModel(config)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     if device.type == "cuda" and torch.cuda.device_count() > 1:
         model = nn.DataParallel(model)
     model.to(device)
-    indices = torch.randperm(len(dataset)).tolist()
-    split_idx = int(len(dataset) * (1 - config["split_valid"]))
-    num_workers = min(8, os.cpu_count() or 1)
-    pad_id = tokenizer.get_split_tokens()["<|padding|>"]
-    train_loader = DataLoader(Subset(dataset, indices[:split_idx]), batch_size=config["batch_size"], num_workers=num_workers, persistent_workers=True, shuffle=True, pin_memory=True)
-    val_loader = DataLoader(Subset(dataset, indices[split_idx:]), batch_size=config["batch_size"], num_workers=num_workers, persistent_workers=True, shuffle=False, pin_memory=True)
     optimizer = Adam8bit(model.parameters(), lr=config["learning_rate"], weight_decay=config["weight_decay"], betas=config["betas_range"])
     scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.7, patience=1)
-    for epoch in range(config["epochs_size"]):
-        model.train()
-        train_loss, train_acc = run_epoch(model, train_loader, device, pad_id, epoch, optimizer)
-        model.eval()
-        val_loss, val_acc = run_epoch(model, val_loader, device, pad_id, epoch)
-        scheduler.step(val_loss)
-        save_path = os.path.join("./model", f"{stage_name}_epoch_{epoch+1}")
-        os.makedirs(save_path, exist_ok=True)
-        with open(os.path.join(save_path, "tokenizer.json"), "w", encoding="utf-8") as f:
-            json.dump(tokenizer.get_split_tokens(), f, indent=4, ensure_ascii=False)
-        with open(os.path.join(save_path, "config.json"), "w", encoding="utf-8") as f:
-            json.dump(config, f, indent=4, ensure_ascii=False)
-        save_file(model.state_dict(), os.path.join(save_path, "model.safetensors"))
+    num_workers = min(8, os.cpu_count() or 1)
+
+    for stage in stages:
+        print(f"\n========== {stage['stage_name']} ==========\n")
+        dataset = ChatDataset(tokenizer, stage["file_path"], config)
+        indices = torch.randperm(len(dataset)).tolist()
+        split_idx = int(len(dataset) * (1 - config["split_valid"]))
+        train_loader = DataLoader(Subset(dataset, indices[:split_idx]), batch_size=config["batch_size"], num_workers=num_workers, persistent_workers=True, shuffle=True, pin_memory=True)
+        val_loader = DataLoader(Subset(dataset, indices[split_idx:]), batch_size=config["batch_size"], num_workers=num_workers, persistent_workers=True, shuffle=False, pin_memory=True)
+
+        for epoch in range(stage["epochs"]):
+            model.train()
+            train_loss, train_acc = run_epoch(model, train_loader, device, pad_id, epoch, optimizer)
+            model.eval()
+            val_loss, val_acc = run_epoch(model, val_loader, device, pad_id, epoch)
+            scheduler.step(val_loss)
+
+            save_path = os.path.join("./model", f"{stage['stage_name']}_epoch_{epoch+1}")
+            os.makedirs(save_path, exist_ok=True)
+            with open(os.path.join(save_path, "tokenizer.json"), "w", encoding="utf-8") as f:
+                json.dump(tokenizer.get_split_tokens(), f, indent=4, ensure_ascii=False)
+            with open(os.path.join(save_path, "config.json"), "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=4, ensure_ascii=False)
+            save_file(model.state_dict(), os.path.join(save_path, "model.safetensors"))
 
 # ========== 初始訓練 ==========
 
 if __name__ == "__main__":
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    stage_train("pretrain", "./data/dialogues.txt")
+    torch.backends.cudnn.benchmark = True
+    torch.backends.cuda.matmul.allow_tf32 = True
+    stages = [
+        {"stage_name": "knowledge", "file_path": "./data/wiki_dialogues.txt", "epochs": 5},
+        {"stage_name": "dialogues", "file_path": "./data/daily_dialogues.txt", "epochs": 10}]
+    stage_train(stages, default_config)

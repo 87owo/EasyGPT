@@ -47,12 +47,12 @@ def generate_response(model, tokenizer, prompt, max_length=2048, temperature=0.7
 
 if __name__ == "__main__":
     print("EasyGPT Beta V1.3 Torch Inference (Dev)")
-    model_dir = "./model/pretrain_epoch_30"
+    model_dir = "./model/dialogues_epoch_15"
     with open(os.path.join(model_dir, "config.json"), "r", encoding="utf-8") as f:
         config = json.load(f)
     with open(os.path.join(model_dir, "tokenizer.json"), "r", encoding="utf-8") as f:
         token_dict = json.load(f)
-    tokenizer = ChatTokenizer()
+    tokenizer = ChatTokenizer(config)
     tokenizer.split_tokens = token_dict
     device = torch.device("cpu") #("cuda" if torch.cuda.is_available() else "cpu")
     model = ChatModel().to(device)
