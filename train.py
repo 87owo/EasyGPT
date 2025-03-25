@@ -383,6 +383,6 @@ if __name__ == "__main__":
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
     stages = [
-        {"stage_name": "knowledge", "file_path": "./output/wiki_dialogues.txt", "epochs": 5},
-        {"stage_name": "dialogues", "file_path": "./output/daily_dialogues.txt", "epochs": 15}]
+        {"stage_name": "knowledge", "file_path": "./data/wiki_dialogues.txt", "epochs": 5},
+        {"stage_name": "dialogues", "file_path": "./data/daily_dialogues.txt", "epochs": 15}]
     stage_train(stages, default_config)
