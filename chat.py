@@ -55,7 +55,7 @@ if __name__ == "__main__":
     tokenizer = ChatTokenizer(config)
     tokenizer.split_tokens = token_dict
     device = torch.device("cpu") #("cuda" if torch.cuda.is_available() else "cpu")
-    model = ChatModel().to(device)
+    model = ChatModel(config).to(device)
     state_dict = load_file(os.path.join(model_dir, "model.safetensors"))
     model.load_state_dict(state_dict)
     model.eval()
