@@ -318,6 +318,7 @@ def run_epoch(model, data_loader, device, pad_id, epoch, optimizer=None):
             with torch.amp.autocast(device_type="cuda"):
                 outputs = model(**batch)
                 loss = outputs["loss"]
+                loss = loss.mean()
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
