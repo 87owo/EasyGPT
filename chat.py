@@ -48,7 +48,7 @@ def generate_response(model, tokenizer, prompt, max_length=1024, temperature=0.7
 
 if __name__ == "__main__":
     print("EasyGPT Beta V1.3 Torch Inference (Dev)")
-    model_dir = "./model/dialogues_epoch_2"
+    model_dir = "./model/dialogues_epoch_20"
     with open(os.path.join(model_dir, "config.json"), "r", encoding="utf-8") as f:
         config = json.load(f)
     with open(os.path.join(model_dir, "tokenizer.json"), "r", encoding="utf-8") as f:
