@@ -1,6 +1,7 @@
 # EasyGPT
 
 Easily train and inference on your personal computer, no need for large scale clusters!
+
 It is recommended to have at least 10,000 pieces of training data and 20 training rounds.
 
 ## Requirements
