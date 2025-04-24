@@ -3,7 +3,7 @@ from train import *
 
 # ========== 預測對話 ==========
 
-def generate_response(model, tokenizer, prompt, max_length=2048, temperature=0.7, repetition_penalty=1.2, presence_penalty=-1.0):
+def generate_response(model, tokenizer, prompt, max_length=1024, temperature=0.7, repetition_penalty=1.0, presence_penalty=-1.0):
     encoded = tokenizer(f"<|user|>{prompt}<|assistant|>")
     generated = encoded["input_ids"].unsqueeze(0).to(device)
     print("\nAssistant: ", end="", flush=True)
@@ -18,7 +18,7 @@ def generate_response(model, tokenizer, prompt, max_length=2048, temperature=0.7
             else:
                 current_input = generated
                 pos_offset = 0
-            outputs = model(current_input, position_offset=pos_offset)
+            outputs = model(current_input, pos_offset=pos_offset)
             logits = outputs["logits"][0, -1, :]
             gen_tokens = set(generated.squeeze().tolist())
             for token in gen_tokens:
@@ -26,6 +26,7 @@ def generate_response(model, tokenizer, prompt, max_length=2048, temperature=0.7
             vocab_size = logits.shape[0]
             mask = torch.tensor([token not in gen_tokens for token in range(vocab_size)], device=logits.device)
             logits[mask] += presence_penalty
+            logits[~mask] -= repetition_penalty
             probs = torch.softmax(logits / temperature, dim=-1)
             next_token = torch.multinomial(probs, num_samples=1)
             token_id = next_token.item()
@@ -47,7 +48,7 @@ def generate_response(model, tokenizer, prompt, max_length=2048, temperature=0.7
 
 if __name__ == "__main__":
     print("EasyGPT Beta V1.3 Torch Inference (Dev)")
-    model_dir = "./model/dialogues_epoch_15"
+    model_dir = "./model/dialogues_epoch_2"
     with open(os.path.join(model_dir, "config.json"), "r", encoding="utf-8") as f:
         config = json.load(f)
     with open(os.path.join(model_dir, "tokenizer.json"), "r", encoding="utf-8") as f:
