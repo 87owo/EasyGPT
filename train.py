@@ -262,6 +262,7 @@ class ChatDataset(Dataset):
         enc = self.tokenizer(self.data[idx], self.max_len, update=False)
         ids = enc["input_ids"]
         return {"input_ids": ids[:-1], "attention_mask": enc["attention_mask"][:-1], "labels": ids[1:]}
+
 # ========== 訓練週期 ==========
 
 def run_epoch(model, data_loader, device, pad_id, epoch, optimizer=None):
