@@ -199,7 +199,7 @@ class ChatTokenizer:
         for t, idx in config["special_tokens"].items():
             self.split_tokens[t] = idx
         toks = sorted(self.split_tokens.keys(), key=lambda x: len(x), reverse=True)
-        self.pattern = re.compile(f"({'|'.join(list(map(re.escape, toks)))})|([a-zA-Z]+)|( )|([0-9])|(_)|([^\s])", re.UNICODE)
+        self.pattern = re.compile(rf"({'|'.join(list(map(re.escape, toks)))})|([a-zA-Z]+)|( )|([0-9])|(_)|([^\s])", re.UNICODE)
 
     def tokenize(self, text):
         return [m.group() for m in self.pattern.finditer(text)]
