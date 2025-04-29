@@ -10,10 +10,10 @@ from tqdm import tqdm
 # ========== 模型配置 ==========
 
 default_config = {
-    "hidden_size": 512,
-    "num_layers": 3,
-    "num_heads": 8,
-    "num_experts": 4,
+    "hidden_size": 256,
+    "num_layers": 2,
+    "num_heads": 4,
+    "num_experts": 3,
     "expert_loss": 0.01,
     "rope_dim": 64,
     "rope_base": 10000,
@@ -21,7 +21,7 @@ default_config = {
     "window_size": 1024,
     "vocab_size": 16000,
     "max_seq_length": 1024,
-    "batch_size": 8,
+    "batch_size": 16,
     "split_valid": 0.1,
     "weight_decay": 0.1,
     "dropout_rate": 0.1,
@@ -350,5 +350,5 @@ if __name__ == "__main__":
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
     stages = [
-        {"stage_name": "dialogues", "file_path": "./data/daily_dialogues.txt", "epochs": 20}]
+        {"stage_name": "dialogues", "file_path": "./data/daily_dialogues.txt", "epochs": 30}]
     stage_train(stages, default_config)
