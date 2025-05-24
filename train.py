@@ -129,14 +129,18 @@ def rotate_half(x):
 class FeedForward(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.in_proj = nn.Linear(config["hidden_size"], config["ffn_hidden_size"]*2, bias=False)
-        self.up_proj = nn.Linear(config["ffn_hidden_size"], config["hidden_size"], bias=False)
+        self.hidden_size = config["hidden_size"]
+        self.ffn_hidden_size = config["ffn_hidden_size"]
+        self.in_proj = nn.Linear(self.hidden_size, self.ffn_hidden_size * 2, bias=False)
+        self.up_proj = nn.Linear(self.ffn_hidden_size, self.hidden_size, bias=False)
+        self.dropout = nn.Dropout(config["dropout_rate"])
 
     def forward(self, x):
-        h = self.in_proj(x)
-        x1, x2 = h.chunk(2, dim=-1)
-        x = x1 * F.silu(x2)
+        x_proj = self.in_proj(x)
+        x1, x2 = x_proj.chunk(2, dim=-1)
+        x = F.silu(x1) * x2
         x = self.up_proj(x)
+        x = self.dropout(x)
         return x
 
 # ================================================

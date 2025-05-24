@@ -1,7 +1,7 @@
 from safetensors.torch import load_file
 from train import *
 
-# ========== 預測對話 ==========
+# ================================================
 
 def generate_response(model, tokenizer, prompt, max_length=512, temperature=0.7, repetition_penalty=1.0, presence_penalty=-1.0):
     encoded = tokenizer(f"<|user|>{prompt}<|assistant|>")
@@ -44,10 +44,10 @@ def generate_response(model, tokenizer, prompt, max_length=512, temperature=0.7,
             else:
                 print(token_str, end="", flush=True)
 
-# ========== 初始預測 ==========
+# ================================================
 
 if __name__ == "__main__":
-    print("EasyGPT Beta V1.3 Torch Inference (Dev)")
+    print("EasyGPT Beta V1.4 Torch Inference (Dev)")
     model_dir = "./model/dialogues_epoch_30"
     with open(os.path.join(model_dir, "config.json"), "r", encoding="utf-8") as f:
         config = json.load(f)
