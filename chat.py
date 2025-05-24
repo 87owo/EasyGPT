@@ -47,7 +47,7 @@ def generate_response(model, tokenizer, prompt, device, config, max_length=1024,
                 probs = probs / probs.sum()
                 token_id = torch.multinomial(probs, num_samples=1).item()
 
-            generated = torch.cat((generated, torch.tensor([[token_id]], device=device)), dim=1)
+            generated = torch.cat((generated, torch.tensor([[token_id]], device=generated.device)), dim=1)
             if token_id == end_id:
                 break
             token_str = tokenizer.decode([token_id])
@@ -65,7 +65,7 @@ def load_chat_model(model_dir, device):
     with open(os.path.join(model_dir, "tokenizer.json"), "r", encoding="utf-8") as f:
         token_dict = json.load(f)
     tokenizer = ChatTokenizer(config)
-    tokenizer.split_tokens = token_dict
+    tokenizer.split_tokens = OrderedDict(token_dict)
     model = ChatModel(config).to(device)
     state_dict = load_file(os.path.join(model_dir, "model.safetensors"))
     model.load_state_dict(state_dict)
