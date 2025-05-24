@@ -322,7 +322,6 @@ def stage_train(stages, config):
     model.to(device)
 
     optimizer = Adam8bit(model.parameters(), lr=config["learning_rate"], weight_decay=config["weight_decay"], betas=config["betas_range"])
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode="min", factor=0.7, patience=1)
     num_workers = min(8, os.cpu_count() or 1)
 
     for stage in stages:
@@ -334,13 +333,14 @@ def stage_train(stages, config):
             num_workers=num_workers, persistent_workers=True, shuffle=True, pin_memory=True)
         val_loader = DataLoader(Subset(dataset, indices[split_idx:]), batch_size=config["batch_size"],
             num_workers=num_workers, persistent_workers=True, shuffle=False, pin_memory=True)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=stage["epochs"], eta_min=1e-6)
 
         for epoch in range(stage["epochs"]):
             model.train()
             train_loss, train_acc = run_epoch(model, train_loader, device, pad_id, epoch, optimizer)
             model.eval()
             val_loss, val_acc = run_epoch(model, val_loader, device, pad_id, epoch)
-            scheduler.step(val_loss)
+            scheduler.step()
 
             save_path = os.path.join("./model", f"{stage['stage_name']}_epoch_{epoch+1}")
             os.makedirs(save_path, exist_ok=True)
