@@ -12,9 +12,9 @@ def generate_response(model, tokenizer, prompt, max_length=1024, temperature=0.7
     newline_id = tokenizer.split_tokens.get("\\n")
     with torch.no_grad():
         while generated.size(1) < max_length:
-            if generated.size(1) > config["window_size"]:
-                current_input = generated[:, -config["window_size"]:]
-                pos_offset = generated.size(1) - config["window_size"]
+            if generated.size(1) > config["max_seq_length"]:
+                current_input = generated[:, -config["max_seq_length"]:]
+                pos_offset = generated.size(1) - config["max_seq_length"]
             else:
                 current_input = generated
                 pos_offset = 0
@@ -48,7 +48,7 @@ def generate_response(model, tokenizer, prompt, max_length=1024, temperature=0.7
 
 if __name__ == "__main__":
     print("EasyGPT Beta V1.3 Torch Inference (Dev)")
-    model_dir = "./model/dialogues_epoch_20"
+    model_dir = "./model/dialogues_epoch_30"
     with open(os.path.join(model_dir, "config.json"), "r", encoding="utf-8") as f:
         config = json.load(f)
     with open(os.path.join(model_dir, "tokenizer.json"), "r", encoding="utf-8") as f:

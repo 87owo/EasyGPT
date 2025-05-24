@@ -7,29 +7,29 @@ from bitsandbytes.optim import Adam8bit
 from collections import Counter, OrderedDict
 from tqdm import tqdm
 
-# ========== 模型配置 ==========
+# ================================================
 
 default_config = {
-    "hidden_size": 256,
-    "num_layers": 2,
+    "hidden_size": 512,
+    "block_count": 6,
     "num_heads": 4,
-    "num_experts": 3,
-    "expert_loss": 0.01,
+    "num_kv_heads": 2,
+    "ffn_hidden_size": 1024,
     "rope_dim": 64,
     "rope_base": 10000,
-    "forward_dim": 1280,
-    "window_size": 1024,
-    "vocab_size": 16000,
+    "vocab_size": 32000,
     "max_seq_length": 1024,
-    "batch_size": 16,
+    "batch_size": 8,
     "split_valid": 0.1,
     "weight_decay": 0.1,
     "dropout_rate": 0.1,
     "learning_rate": 0.001,
     "betas_range": (0.9, 0.999),
+    "layer_norm_eps": 1e-6,
     "global_tokens": {
         "<|padding|>": 0,
-        "<|unknown|>": 1},
+        "<|unknown|>": 1
+    },
     "special_tokens": {
         "<|system|>": 2,
         "<|user|>": 3,
@@ -37,133 +37,139 @@ default_config = {
         "<|assistant|>": 5,
         "<|function|>": 6,
         "<|end|>": 7,
-        "\\n": 8}
+        "\\n": 8
+    }
 }
 
-# ========== 前饋專家 ==========
+# ================================================
 
-class MoEFeedForward(nn.Module):
-    def __init__(self, config):
+class RotaryEmbedding(nn.Module):
+    def __init__(self, dim, base=10000):
         super().__init__()
-        self.num_experts = config["num_experts"]
-        self.dropout = nn.Dropout(config["dropout_rate"])
-        self.experts = nn.ModuleList([GEGLU(config) for _ in range(self.num_experts)])
-        self.gate = nn.Linear(config["hidden_size"], self.num_experts)
+        inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer("inv_freq", inv_freq)
 
+    def forward(self, seq_len, offset=0, device=None):
+        pos = torch.arange(offset, offset + seq_len, device=device).type_as(self.inv_freq)
+        freqs = torch.einsum("i,j->ij", pos, self.inv_freq)
+        emb = torch.cat((freqs, freqs), dim=-1)
+        cos = emb.cos()[None, :, :]
+        sin = emb.sin()[None, :, :]
+        return cos, sin
+
+# ================================================
+
+class RMSNorm(nn.Module):
+    def __init__(self, d, eps=1e-6):
+        super().__init__()
+        self.eps = eps
+        self.weight = nn.Parameter(torch.ones(d))
     def forward(self, x):
-        B, T, D = x.shape
-        x_flat = x.view(-1, D)
-        gate_logits = self.gate(x_flat)
-        gate_probs = F.softmax(gate_logits, dim=-1)
-        expert_outputs = torch.stack([exp(x_flat) for exp in self.experts], dim=1)
-        weighted = (expert_outputs * gate_probs.unsqueeze(-1)).sum(dim=1)
-        utilization = gate_probs.mean(dim=0)
-        util_loss = ((utilization - 1.0/self.num_experts)**2).sum()
-        out = weighted.view(B, T, D)
-        return self.dropout(out), util_loss
+        norm = x.norm(dim=-1, keepdim=True) * (x.shape[-1] ** -0.5)
+        return self.weight * (x / (norm + self.eps))
 
-# ========== 自注意力 ==========
+# ================================================
 
 class SelfAttention(nn.Module):
     def __init__(self, config):
         super().__init__()
-        hd = config["hidden_size"] // config["num_heads"]
-        assert config["rope_dim"] <= hd
+        self.hidden_size = config["hidden_size"]
         self.num_heads = config["num_heads"]
-        self.head_dim = hd
-        self.qkv = nn.Linear(config["hidden_size"], 3*self.num_heads*self.head_dim)
-        self.out_proj = nn.Linear(self.num_heads*self.head_dim, config["hidden_size"])
-        self.attn_dropout = nn.Dropout(config["dropout_rate"])
-        if config["rope_dim"] > 0:
-            self.rotary = RotaryEmbedding(config)
+        self.num_kv_heads = config["num_kv_heads"]
+        self.head_dim = self.hidden_size // self.num_heads
+        self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
+        self.k_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
+        self.v_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
+        self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
+        self.dropout = nn.Dropout(config["dropout_rate"])
+        self.rope = RotaryEmbedding(config["rope_dim"], base=config["rope_base"])
+        self.rope_dim = config["rope_dim"]
 
-    def forward(self, x, mask=None, input_ids=None, pos_offset=0):
-        B, T, _ = x.shape
-        qkv = self.qkv(x).chunk(3, dim=-1)
-        q, k, v = [t.view(B, T, self.num_heads, self.head_dim).transpose(1, 2) for t in qkv]
-        if hasattr(self, 'rotary'):
-            cos, sin = self.rotary(q, offset=pos_offset)
-            q = apply_rotary(q, cos, sin)
-            k = apply_rotary(k, cos, sin)
-        scale = self.head_dim ** 0.5
-        attn = (q @ k.transpose(-2, -1)) / scale
+    def forward(self, x, mask=None, pos_offset=0):
+        B, T, C = x.shape
+        q = self.q_proj(x).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
+        k = self.k_proj(x).view(B, T, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        v = self.v_proj(x).view(B, T, self.num_kv_heads, self.head_dim).transpose(1, 2)
+        if self.num_heads != self.num_kv_heads:
+            repeat = self.num_heads // self.num_kv_heads
+            k = k.repeat_interleave(repeat, dim=1)
+            v = v.repeat_interleave(repeat, dim=1)
+        rope_dim = min(self.rope_dim, self.head_dim)
+        if rope_dim > 0:
+            cos, sin = self.rope(T, pos_offset, x.device)
+            cos, sin = cos.squeeze(0), sin.squeeze(0)
+            q1 = q[..., :rope_dim]
+            q2 = q[..., rope_dim:]
+            k1 = k[..., :rope_dim]
+            k2 = k[..., rope_dim:]
+            cos = cos.unsqueeze(0).unsqueeze(0)
+            sin = sin.unsqueeze(0).unsqueeze(0)
+            q1 = q1 * cos + rotate_half(q1) * sin
+            k1 = k1 * cos + rotate_half(k1) * sin
+            q = torch.cat([q1, q2], dim=-1)
+            k = torch.cat([k1, k2], dim=-1)
+        scale = self.head_dim ** -0.5
+        attn = torch.matmul(q, k.transpose(-2, -1)) * scale
         if mask is not None:
-            attn = attn.masked_fill(mask, -torch.finfo(q.dtype).max)
-        w = torch.softmax(attn, dim=-1)
-        w = self.attn_dropout(w)
-        out = (w @ v).transpose(1, 2).reshape(B, T, -1)
-        return self.out_proj(out)
+            attn = attn.masked_fill(mask, torch.finfo(attn.dtype).min)
+        attn = torch.softmax(attn, dim=-1)
+        attn = self.dropout(attn)
+        out = torch.matmul(attn, v).transpose(1, 2).reshape(B, T, -1)
+        out = self.o_proj(out)
+        return out
 
-# ========== 位置編碼 ==========
+def rotate_half(x):
+    x1 = x[..., ::2]
+    x2 = x[..., 1::2]
+    return torch.cat([-x2, x1], dim=-1)
 
-class RotaryEmbedding(nn.Module):
+# ================================================
+
+class FeedForward(nn.Module):
     def __init__(self, config):
         super().__init__()
-        inv_freq = 1.0 / (config["rope_base"] ** (torch.arange(0, config["rope_dim"], 2).float() / config["rope_dim"]))
-        self.register_buffer("inv_freq", inv_freq)
+        self.in_proj = nn.Linear(config["hidden_size"], config["ffn_hidden_size"]*2, bias=False)
+        self.up_proj = nn.Linear(config["ffn_hidden_size"], config["hidden_size"], bias=False)
 
-    def forward(self, x, offset=0):
-        B, H, T, _ = x.shape
-        pos = torch.arange(offset, offset + T, device=x.device).float()
-        freqs = torch.einsum("i,j->ij", pos, self.inv_freq)
-        cos = freqs.cos()[None, None, :, :]
-        sin = freqs.sin()[None, None, :, :]
-        return cos, sin
+    def forward(self, x):
+        h = self.in_proj(x)
+        x1, x2 = h.chunk(2, dim=-1)
+        x = x1 * F.silu(x2)
+        x = self.up_proj(x)
+        return x
 
-def apply_rotary(x, cos, sin):
-    d = x.shape[-1]
-    x1, x2 = x[..., :d//2], x[..., d//2:]
-    return torch.cat([x1 * cos - x2 * sin, x1 * sin + x2 * cos], dim=-1)
-
-# ========== 殘差模塊 ==========
+# ================================================
 
 class TransformerBlock(nn.Module):
     def __init__(self, config):
         super().__init__()
-        self.ln1 = nn.LayerNorm(config["hidden_size"])
+        self.attn_norm = RMSNorm(config["hidden_size"], eps=config["layer_norm_eps"])
         self.attn = SelfAttention(config)
-        self.ln2 = nn.LayerNorm(config["hidden_size"])
-        self.ffn = MoEFeedForward(config)
+        self.ffn_norm = RMSNorm(config["hidden_size"], eps=config["layer_norm_eps"])
+        self.ffn = FeedForward(config)
         self.dropout = nn.Dropout(config["dropout_rate"])
 
-    def forward(self, x, mask=None, input_ids=None, pos_offset=0):
-        res = x
-        x = res + self.dropout(self.attn(self.ln1(x), mask, input_ids, pos_offset))
-        out, util = self.ffn(self.ln2(x))
-        return x + self.dropout(out), util
+    def forward(self, x, mask=None, pos_offset=0):
+        x = x + self.dropout(self.attn(self.attn_norm(x), mask=mask, pos_offset=pos_offset))
+        x = x + self.dropout(self.ffn(self.ffn_norm(x)))
+        return x
 
-# ========== 激活函數 ==========
-
-class GEGLU(nn.Module):
-    def __init__(self, config):
-        super().__init__()
-        self.config = config
-        self.fc = nn.Linear(config["hidden_size"], config["forward_dim"] * 2)
-        self.out = nn.Linear(config["forward_dim"], config["hidden_size"])
-
-    def forward(self, x):
-        x1, x2 = self.fc(x).chunk(2, dim=-1)
-        return self.out(x1 * F.gelu(x2))
-
-# ========== 聊天模型 ==========
+# ================================================
 
 class ChatModel(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
         self.embed = nn.Embedding(config["vocab_size"], config["hidden_size"])
-        self.blocks = nn.ModuleList([TransformerBlock(config) for _ in range(config["num_layers"])])
-        self.ln_f = nn.LayerNorm(config["hidden_size"])
-        self.head = nn.Linear(config["hidden_size"], config["vocab_size"])
-        self.mask_cache = {}
+        self.blocks = nn.ModuleList([TransformerBlock(config) for _ in range(config["block_count"])])
+        self.norm = RMSNorm(config["hidden_size"], eps=config["layer_norm_eps"])
+        self.head = nn.Linear(config["hidden_size"], config["vocab_size"], bias=False)
 
     def get_mask(self, T, device):
-        if T not in self.mask_cache:
-            i = torch.arange(T, device=device).unsqueeze(1)
-            j = torch.arange(T, device=device).unsqueeze(0)
-            base = (j > i) | ((i - j) >= self.config["window_size"])
-            self.mask_cache[T] = base.unsqueeze(0).unsqueeze(1)
-        return self.mask_cache[T]
+        i = torch.arange(T, device=device).unsqueeze(1)
+        j = torch.arange(T, device=device).unsqueeze(0)
+        base = (j > i)
+        return base.unsqueeze(0).unsqueeze(1)
 
     def forward(self, input_ids, attention_mask=None, labels=None, pos_offset=0):
         B, T = input_ids.shape
@@ -172,12 +178,9 @@ class ChatModel(nn.Module):
         if attention_mask is not None:
             pad = (attention_mask == 0).view(B, 1, 1, T)
             mask = mask | pad
-        util_loss = 0
         for blk in self.blocks:
-            x, u = blk(x, mask, input_ids, pos_offset)
-            util_loss += u
-        util_loss /= len(self.blocks)
-        x = self.ln_f(x)
+            x = blk(x, mask=mask, pos_offset=pos_offset)
+        x = self.norm(x)
         logits = self.head(x)
         loss = None
         if labels is not None:
@@ -185,10 +188,9 @@ class ChatModel(nn.Module):
                 logits.view(-1, self.config["vocab_size"]),
                 labels.view(-1),
                 ignore_index=self.config["global_tokens"]["<|padding|>"])
-            loss = loss + self.config["expert_loss"] * util_loss
         return {"loss": loss, "logits": logits}
 
-# ========== 分詞器 ==========
+# ================================================
 
 class ChatTokenizer:
     def __init__(self, config):
@@ -246,7 +248,7 @@ class ChatTokenizer:
         inv = {idx: t for t, idx in self.split_tokens.items()}
         return ''.join(inv.get(i, "<|unknown|>") for i in ids)
 
-# ========== 數據集 ==========
+# ================================================
 
 class ChatDataset(Dataset):
     def __init__(self, tokenizer, path, config):
@@ -263,7 +265,7 @@ class ChatDataset(Dataset):
         ids = enc["input_ids"]
         return {"input_ids": ids[:-1], "attention_mask": enc["attention_mask"][:-1], "labels": ids[1:]}
 
-# ========== 訓練週期 ==========
+# ================================================
 
 def run_epoch(model, data_loader, device, pad_id, epoch, optimizer=None):
     total_loss, total_correct, total_tokens = 0.0, 0, 0
@@ -302,7 +304,7 @@ def run_epoch(model, data_loader, device, pad_id, epoch, optimizer=None):
         pbar.set_postfix({"loss": f"{loss.item():.6f}", "acc": f"{acc:.6f}", "lr": f"{lr:.6f}"})
     return total_loss / len(data_loader), total_correct / total_tokens if total_tokens > 0 else 0.0
 
-# ========== 階段訓練 ==========
+# ================================================
 
 def stage_train(stages, config):
     print(f"\n========== Tokenizer ==========\n")
@@ -344,7 +346,7 @@ def stage_train(stages, config):
             state = model.state_dict()
             save_file(state, os.path.join(save_path, "model.safetensors"))
 
-# ========== 初始訓練 ==========
+# ================================================
 
 if __name__ == "__main__":
     torch.backends.cudnn.benchmark = True
