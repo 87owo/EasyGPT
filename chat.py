@@ -3,7 +3,7 @@ from train import *
 
 # ========== 預測對話 ==========
 
-def generate_response(model, tokenizer, prompt, max_length=1024, temperature=0.7, repetition_penalty=1.0, presence_penalty=-1.0):
+def generate_response(model, tokenizer, prompt, max_length=512, temperature=0.7, repetition_penalty=1.0, presence_penalty=-1.0):
     encoded = tokenizer(f"<|user|>{prompt}<|assistant|>")
     generated = encoded["input_ids"].unsqueeze(0).to(device)
     print("\nAssistant: ", end="", flush=True)
