@@ -64,9 +64,10 @@ class RMSNorm(nn.Module):
         super().__init__()
         self.eps = eps
         self.weight = nn.Parameter(torch.ones(d))
+
     def forward(self, x):
-        norm = x.norm(dim=-1, keepdim=True) * (x.shape[-1] ** -0.5)
-        return self.weight * (x / (norm + self.eps))
+        norm = x.pow(2).mean(-1, keepdim=True).add(self.eps).sqrt()
+        return self.weight * (x / norm)
 
 # ================================================
 
