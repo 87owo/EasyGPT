@@ -10,16 +10,16 @@ from tqdm import tqdm
 # ================================================
 
 default_config = {
-    "hidden_size": 512,
+    "hidden_size": 256,
     "block_count": 8,
-    "num_heads": 6,
-    "num_kv_heads": 3,
-    "ffn_hidden_size": 1536,
+    "num_heads": 4,
+    "num_kv_heads": 2,
+    "ffn_hidden_size": 1024,
     "rope_dim": 64,
     "rope_base": 10000,
-    "vocab_size": 32000,
-    "max_seq_length": 1024,
-    "batch_size": 4,
+    "vocab_size": 8000,
+    "max_seq_length": 512,
+    "batch_size": 32,
     "split_valid": 0.1,
     "weight_decay": 0.01,
     "dropout_rate": 0.05,
