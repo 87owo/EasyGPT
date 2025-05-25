@@ -11,19 +11,19 @@ from tqdm import tqdm
 
 default_config = {
     "hidden_size": 512,
-    "block_count": 6,
-    "num_heads": 4,
-    "num_kv_heads": 2,
-    "ffn_hidden_size": 1024,
+    "block_count": 8,
+    "num_heads": 6,
+    "num_kv_heads": 3,
+    "ffn_hidden_size": 1536,
     "rope_dim": 64,
     "rope_base": 10000,
     "vocab_size": 32000,
-    "max_seq_length": 512,
-    "batch_size": 16,
+    "max_seq_length": 1024,
+    "batch_size": 4,
     "split_valid": 0.1,
     "weight_decay": 0.01,
     "dropout_rate": 0.05,
-    "learning_rate": 1e-4,
+    "learning_rate": 1e-3,
     "betas_range": (0.9, 0.999),
     "layer_norm_eps": 1e-6,
     "global_tokens": {
@@ -357,5 +357,5 @@ if __name__ == "__main__":
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
     stages = [
-        {"stage_name": "dialogues", "file_path": "./data/daily_dialogues.txt", "epochs": 30}]
+        {"stage_name": "dialogues", "file_path": "./data/daily_dialogues.txt", "epochs": 30},]
     stage_train(stages, default_config)
