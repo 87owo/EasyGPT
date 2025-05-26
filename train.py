@@ -37,7 +37,7 @@ default_config = {
         "<|assistant|>": 5,
         "<|function|>": 6,
         "<|end|>": 7,
-        "\\n": 8
+        "\\n": 8,
     }
 }
 
@@ -138,7 +138,7 @@ class FeedForward(nn.Module):
     def forward(self, x):
         x_proj = self.in_proj(x)
         x1, x2 = x_proj.chunk(2, dim=-1)
-        x = F.silu(x1) * x2
+        x = F.gelu(x1) * x2
         x = self.up_proj(x)
         x = self.dropout(x)
         return x
