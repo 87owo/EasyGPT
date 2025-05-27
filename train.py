@@ -23,7 +23,7 @@ default_config = {
     "split_valid": 0.1,
     "weight_decay": 0.0,
     "dropout_rate": 0.0,
-    "learning_rate": 1e-3,
+    "learning_rate": 1e-4,
     "betas_range": (0.9, 0.999),
     "layer_norm_eps": 1e-6,
     "global_tokens": {
@@ -357,5 +357,5 @@ if __name__ == "__main__":
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
     stages = [
-        {"stage_name": "dialogues", "file_path": "./data/daily_dialogues.txt", "epochs": 30},]
+        {"stage_name": "dialogues", "file_path": "./data/daily_dialogues.txt", "epochs": 20},]
     stage_train(stages, default_config)
