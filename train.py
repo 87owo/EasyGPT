@@ -10,11 +10,11 @@ from tqdm import tqdm
 # ================================================
 
 default_config = {
-    "hidden_size": 512,
+    "hidden_size": 256,
     "block_count": 6,
     "num_heads": 4,
     "num_kv_heads": 2,
-    "ffn_hidden_size": 1536,
+    "ffn_hidden_size": 1024,
     "rope_dim": 64,
     "rope_base": 10000,
     "vocab_size": 32000,
