@@ -10,19 +10,19 @@ from tqdm import tqdm
 # ================================================
 
 default_config = {
-    "hidden_size": 256,
-    "block_count": 6,
-    "num_heads": 4,
-    "num_kv_heads": 2,
-    "ffn_hidden_size": 1024,
+    "hidden_size": 512,
+    "ffn_hidden_size": 2048,
+    "block_count": 12,
+    "num_heads": 8,
+    "num_kv_heads": 8,
     "rope_dim": 64,
     "rope_base": 10000,
     "vocab_size": 32000,
     "max_seq_length": 1024,
-    "batch_size": 8,
-    "split_valid": 0.1,
-    "weight_decay": 0.0,
-    "dropout_rate": 0.0,
+    "batch_size": 4,
+    "split_valid": 0.01,
+    "weight_decay": 0.01,
+    "dropout_rate": 0.1,
     "learning_rate": 1e-4,
     "betas_range": (0.9, 0.999),
     "layer_norm_eps": 1e-6,
@@ -38,6 +38,8 @@ default_config = {
         "<|function|>": 6,
         "<|end|>": 7,
         "\\n": 8,
+        "EasyGPT": 9,
+        "87owo": 10,
     }
 }
 
@@ -272,6 +274,19 @@ class ChatDataset(Dataset):
 
 # ================================================
 
+class CustomLRScheduler:
+    def __init__(self, optimizer, base_lr=1e-4, gamma=0.7):
+        self.optimizer = optimizer
+        self.base_lr = base_lr
+        self.gamma = gamma
+
+    def step(self, epoch):
+        new_lr = self.base_lr * (self.gamma ** epoch)
+        for param_group in self.optimizer.param_groups:
+            param_group['lr'] = new_lr
+
+# ================================================
+
 def run_epoch(model, data_loader, device, pad_id, epoch, optimizer=None):
     total_loss, total_correct, total_tokens = 0.0, 0, 0
     if optimizer is not None:
@@ -329,18 +344,19 @@ def stage_train(stages, config):
         dataset = ChatDataset(tokenizer, stage["file_path"], config)
         indices = torch.randperm(len(dataset)).tolist()
         split_idx = int(len(dataset) * (1 - config["split_valid"]))
+
         train_loader = DataLoader(Subset(dataset, indices[:split_idx]), batch_size=config["batch_size"],
             num_workers=num_workers, persistent_workers=True, shuffle=True, pin_memory=True)
         val_loader = DataLoader(Subset(dataset, indices[split_idx:]), batch_size=config["batch_size"],
             num_workers=num_workers, persistent_workers=True, shuffle=False, pin_memory=True)
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=stage["epochs"], eta_min=1e-6)
+        scheduler = CustomLRScheduler(optimizer, base_lr=config["learning_rate"], gamma=0.7)
 
         for epoch in range(stage["epochs"]):
             model.train()
             train_loss, train_acc = run_epoch(model, train_loader, device, pad_id, epoch, optimizer)
             model.eval()
             val_loss, val_acc = run_epoch(model, val_loader, device, pad_id, epoch)
-            scheduler.step()
+            scheduler.step(epoch)
 
             save_path = os.path.join("./model", f"{stage['stage_name']}_epoch_{epoch+1}")
             os.makedirs(save_path, exist_ok=True)
@@ -357,5 +373,5 @@ if __name__ == "__main__":
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
     stages = [
-        {"stage_name": "dialogues", "file_path": "./data/daily_dialogues.txt", "epochs": 20},]
+        {"stage_name": "dialogues", "file_path": "./data/daily_dialogues.txt", "epochs": 30},]
     stage_train(stages, default_config)
