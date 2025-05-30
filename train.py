@@ -352,11 +352,11 @@ def stage_train(stages, config):
         scheduler = CustomLRScheduler(optimizer, base_lr=config["learning_rate"], gamma=0.7)
 
         for epoch in range(stage["epochs"]):
+            scheduler.step(epoch)
             model.train()
             train_loss, train_acc = run_epoch(model, train_loader, device, pad_id, epoch, optimizer)
             model.eval()
             val_loss, val_acc = run_epoch(model, val_loader, device, pad_id, epoch)
-            scheduler.step(epoch)
 
             save_path = os.path.join("./model", f"{stage['stage_name']}_epoch_{epoch+1}")
             os.makedirs(save_path, exist_ok=True)
