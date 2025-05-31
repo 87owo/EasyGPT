@@ -38,8 +38,6 @@ default_config = {
         "<|function|>": 6,
         "<|end|>": 7,
         "\\n": 8,
-        "EasyGPT": 9,
-        "87owo": 10,
     }
 }
 
@@ -259,10 +257,10 @@ class ChatTokenizer:
 
 class ChatDataset(Dataset):
     def __init__(self, tokenizer, path, config):
-        with open(path, encoding="utf-8") as f:
-            self.data = [l for l in f.read().splitlines() if l.strip()]
         self.tokenizer = tokenizer
         self.max_len = config["max_seq_length"] + 1
+        with open(path, encoding="utf-8") as f:
+            self.data = [l for l in f.read().splitlines() if l.strip()]
 
     def __len__(self):
         return len(self.data)
