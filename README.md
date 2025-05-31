@@ -30,6 +30,10 @@ EasyGPT/
 └── ...
 ```
 
+## Train Dataset
+
+https://github.com/87owo/EasyGPT/releases
+
 ## Official Website
 
 https://github.com/87owo/EasyGPT
