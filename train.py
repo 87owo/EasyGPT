@@ -10,16 +10,16 @@ from tqdm import tqdm
 # ================================================
 
 default_config = {
-    "hidden_size": 512,
-    "ffn_hidden_size": 2048,
-    "block_count": 12,
-    "num_heads": 8,
-    "num_kv_heads": 8,
+    "hidden_size": 256,
+    "ffn_hidden_size": 1024,
+    "block_count": 8,
+    "num_heads": 4,
+    "num_kv_heads": 4,
     "rope_dim": 64,
     "rope_base": 10000,
     "vocab_size": 32000,
     "max_seq_length": 1024,
-    "batch_size": 4,
+    "batch_size": 8,
     "split_valid": 0.01,
     "weight_decay": 0.01,
     "dropout_rate": 0.1,
@@ -38,6 +38,8 @@ default_config = {
         "<|function|>": 6,
         "<|end|>": 7,
         "\\n": 8,
+        "EasyGPT": 9,
+        "87owo": 10,
     }
 }
 
@@ -232,15 +234,19 @@ class ChatTokenizer:
         return {"input_ids": torch.tensor(ids), "attention_mask": torch.tensor(mask)}
 
     def build_split_tokens(self, stages, min_freq=1):
-        texts = []
-        for s in stages:
-            with open(s["file_path"], encoding="utf-8") as f:
-                texts.extend(f.read().splitlines())
         freq = Counter()
-        for t in tqdm(texts, desc="Tokenize"):
-            for tok in self.tokenize(t):
-                if tok not in self.config["special_tokens"]:
-                    freq[tok] += 1
+        for i, stage in enumerate(stages):
+            path = stage["file_path"]
+            with open(path, encoding="utf-8") as f:
+                total_lines = sum(1 for _ in f)
+            with open(path, encoding="utf-8") as f:
+                for line in tqdm(f, desc=f"[Tokenize {i+1:02d}]", total=total_lines):
+                    line = line.strip()
+                    if not line:
+                        continue
+                    for tok in self.tokenize(line):
+                        if tok not in self.config["special_tokens"]:
+                            freq[tok] += 1
         new = [t for t, c in freq.most_common() if c >= min_freq]
         avail = self.config["vocab_size"] - len(self.split_tokens)
         for t in new[:avail]:
@@ -259,14 +265,25 @@ class ChatDataset(Dataset):
     def __init__(self, tokenizer, path, config):
         self.tokenizer = tokenizer
         self.max_len = config["max_seq_length"] + 1
-        with open(path, encoding="utf-8") as f:
-            self.data = [l for l in f.read().splitlines() if l.strip()]
+        self.path = path
+        self.offsets = []
+        with open(path, "rb") as f:
+            offset = 0
+            for line in f:
+                if line.strip():
+                    self.offsets.append(offset)
+                offset += len(line)
+        self.length = len(self.offsets)
 
     def __len__(self):
-        return len(self.data)
+        return self.length
 
     def __getitem__(self, idx):
-        enc = self.tokenizer(self.data[idx], self.max_len, update=False)
+        offset = self.offsets[idx]
+        with open(self.path, "rb") as f:
+            f.seek(offset)
+            line = f.readline().decode("utf-8").strip()
+        enc = self.tokenizer(line, self.max_len, update=False)
         ids = enc["input_ids"]
         return {"input_ids": ids[:-1], "attention_mask": enc["attention_mask"][:-1], "labels": ids[1:]}
 
