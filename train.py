@@ -10,16 +10,16 @@ from tqdm import tqdm
 # ================================================
 
 default_config = {
-    "hidden_size": 256,
+    "hidden_size": 512,
     "ffn_hidden_size": 1024,
-    "block_count": 8,
-    "num_heads": 4,
-    "num_kv_heads": 4,
+    "block_count": 12,
+    "num_heads": 8,
+    "num_kv_heads": 8,
     "rope_dim": 64,
     "rope_base": 10000,
     "vocab_size": 32000,
     "max_seq_length": 1024,
-    "batch_size": 8,
+    "batch_size": 4,
     "split_valid": 0.01,
     "weight_decay": 0.01,
     "dropout_rate": 0.1,
@@ -320,12 +320,8 @@ def run_epoch(model, data_loader, device, pad_id, epoch, optimizer=None, scaler=
     total_correct = 0
     total_tokens = 0
 
-    if optimizer is not None:
-        mode = "Train"
-        lr = optimizer.param_groups[0]["lr"]
-    else:
-        mode = "Valid"
-        lr = 0.0
+    mode = "Train" if optimizer is not None else "Valid"
+    lr = optimizer.param_groups[0]["lr"]
 
     pbar = tqdm(data_loader, desc=f"[{mode} {epoch+1:02d}]", dynamic_ncols=True)
     for batch in pbar:
