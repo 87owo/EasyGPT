@@ -38,8 +38,6 @@ default_config = {
         "<|function|>": 6,
         "<|end|>": 7,
         "\\n": 8,
-        "EasyGPT": 9,
-        "87owo": 10,
     }
 }
 
