@@ -77,47 +77,51 @@ class SelfAttention(nn.Module):
         self.hidden_size = config["hidden_size"]
         self.num_heads = config["num_heads"]
         self.num_kv_heads = config["num_kv_heads"]
+        self.rope_dim = config["rope_dim"]
+        self.dropout = nn.Dropout(config["dropout_rate"])
         self.head_dim = self.hidden_size // self.num_heads
+        self.rope = RotaryEmbedding(config["rope_dim"], base=config["rope_base"])
+
         self.q_proj = nn.Linear(self.hidden_size, self.num_heads * self.head_dim, bias=False)
         self.k_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
         self.v_proj = nn.Linear(self.hidden_size, self.num_kv_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(self.num_heads * self.head_dim, self.hidden_size, bias=False)
-        self.dropout = nn.Dropout(config["dropout_rate"])
-        self.rope = RotaryEmbedding(config["rope_dim"], base=config["rope_base"])
-        self.rope_dim = config["rope_dim"]
 
     def forward(self, x, mask=None, pos_offset=0):
         B, T, C = x.shape
+        device = x.device
+
         q = self.q_proj(x).view(B, T, self.num_heads, self.head_dim).transpose(1, 2)
         k = self.k_proj(x).view(B, T, self.num_kv_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, T, self.num_kv_heads, self.head_dim).transpose(1, 2)
+
         if self.num_heads != self.num_kv_heads:
             repeat = self.num_heads // self.num_kv_heads
             k = k.repeat_interleave(repeat, dim=1)
             v = v.repeat_interleave(repeat, dim=1)
+
         rope_dim = min(self.rope_dim, self.head_dim)
         if rope_dim > 0:
-            cos, sin = self.rope(T, pos_offset, x.device)
-            cos, sin = cos.squeeze(0), sin.squeeze(0)
-            q1 = q[..., :rope_dim]
-            q2 = q[..., rope_dim:]
-            k1 = k[..., :rope_dim]
-            k2 = k[..., rope_dim:]
-            cos = cos.unsqueeze(0).unsqueeze(0)
-            sin = sin.unsqueeze(0).unsqueeze(0)
+            cos, sin = self.rope(T, pos_offset, device)
+            cos = cos.squeeze(0).unsqueeze(0)
+            sin = sin.squeeze(0).unsqueeze(0)
+            q1, q2 = q[..., :rope_dim], q[..., rope_dim:]
+            k1, k2 = k[..., :rope_dim], k[..., rope_dim:]
             q1 = q1 * cos + rotate_half(q1) * sin
             k1 = k1 * cos + rotate_half(k1) * sin
             q = torch.cat([q1, q2], dim=-1)
             k = torch.cat([k1, k2], dim=-1)
+
         scale = self.head_dim ** -0.5
-        attn = torch.matmul(q, k.transpose(-2, -1)) * scale
+        attn_scores = torch.matmul(q, k.transpose(-2, -1)) * scale
+
         if mask is not None:
-            attn = attn.masked_fill(mask, torch.finfo(attn.dtype).min)
-        attn = torch.softmax(attn, dim=-1)
-        attn = self.dropout(attn)
-        out = torch.matmul(attn, v).transpose(1, 2).reshape(B, T, -1)
-        out = self.o_proj(out)
-        return out
+            attn_scores = attn_scores.masked_fill(mask, torch.finfo(attn_scores.dtype).min)
+
+        attn_probs = torch.softmax(attn_scores, dim=-1)
+        attn_probs = self.dropout(attn_probs)
+        out = torch.matmul(attn_probs, v).transpose(1, 2).reshape(B, T, -1)
+        return self.o_proj(out)
 
 def rotate_half(x):
     x1 = x[..., ::2]
@@ -140,8 +144,7 @@ class FeedForward(nn.Module):
         x1, x2 = x_proj.chunk(2, dim=-1)
         x = F.gelu(x1) * x2
         x = self.up_proj(x)
-        x = self.dropout(x)
-        return x
+        return self.dropout(x)
 
 # ================================================
 
@@ -155,8 +158,13 @@ class TransformerBlock(nn.Module):
         self.dropout = nn.Dropout(config["dropout_rate"])
 
     def forward(self, x, mask=None, pos_offset=0):
-        x = x + self.dropout(self.attn(self.attn_norm(x), mask=mask, pos_offset=pos_offset))
-        x = x + self.dropout(self.ffn(self.ffn_norm(x)))
+        residual = x
+        x = self.attn_norm(x)
+        x = residual + self.dropout(self.attn(x, mask=mask, pos_offset=pos_offset))
+
+        residual = x
+        x = self.ffn_norm(x)
+        x = residual + self.dropout(self.ffn(x))
         return x
 
 # ================================================
@@ -173,26 +181,29 @@ class ChatModel(nn.Module):
     def get_mask(self, T, device):
         i = torch.arange(T, device=device).unsqueeze(1)
         j = torch.arange(T, device=device).unsqueeze(0)
-        base = (j > i)
-        return base.unsqueeze(0).unsqueeze(1)
+        mask = (j > i).unsqueeze(0).unsqueeze(1)
+        return mask
 
     def forward(self, input_ids, attention_mask=None, labels=None, pos_offset=0):
         B, T = input_ids.shape
+        device = input_ids.device
+
         x = self.embed(input_ids)
-        mask = self.get_mask(T, x.device)
+        mask = self.get_mask(T, device)
         if attention_mask is not None:
-            pad = (attention_mask == 0).view(B, 1, 1, T)
-            mask = mask | pad
+            pad_mask = (attention_mask == 0).view(B, 1, 1, T)
+            mask = mask | pad_mask
+
         for blk in self.blocks:
             x = blk(x, mask=mask, pos_offset=pos_offset)
+
         x = self.norm(x)
         logits = self.head(x)
         loss = None
+
         if labels is not None:
-            loss = F.cross_entropy(
-                logits.view(-1, self.config["vocab_size"]),
-                labels.view(-1),
-                ignore_index=self.config["global_tokens"]["<|padding|>"])
+            loss = F.cross_entropy(logits.view(-1, self.config["vocab_size"]),
+                labels.view(-1), ignore_index=self.config["global_tokens"]["<|padding|>"])
         return {"loss": loss, "logits": logits}
 
 # ================================================
@@ -205,8 +216,9 @@ class ChatTokenizer:
             self.split_tokens[t] = idx
         for t, idx in config["special_tokens"].items():
             self.split_tokens[t] = idx
+
         toks = sorted(self.split_tokens.keys(), key=lambda x: len(x), reverse=True)
-        self.pattern = re.compile(rf"({'|'.join(list(map(re.escape, toks)))})|([a-zA-Z]+)|( )|([0-9])|(_)|([^\s])", re.UNICODE)
+        self.pattern = re.compile(rf"({'|'.join(map(re.escape, toks))})|([a-zA-Z]+)|( )|([0-9])|(_)|([^\s])", re.UNICODE)
 
     def tokenize(self, text):
         return [m.group() for m in self.pattern.finditer(text)]
@@ -223,13 +235,15 @@ class ChatTokenizer:
     def __call__(self, text, max_len=None, trunc=True, update=False):
         toks = self.tokenize(text)
         ids = self.convert_tokens_to_ids(toks, update)
+
         if trunc and max_len:
             ids = ids[:max_len]
         if max_len:
             pad_id = self.split_tokens["<|padding|>"]
             ids = ids + [pad_id] * (max_len - len(ids))
+
         mask = [1 if i != self.split_tokens["<|padding|>"] else 0 for i in ids]
-        return {"input_ids": torch.tensor(ids), "attention_mask": torch.tensor(mask)}
+        return {"input_ids": torch.tensor(ids, dtype=torch.long), "attention_mask": torch.tensor(mask, dtype=torch.long)}
 
     def build_split_tokens(self, stages, min_freq=1):
         freq = Counter()
@@ -237,17 +251,18 @@ class ChatTokenizer:
             path = stage["file_path"]
             with open(path, encoding="utf-8") as f:
                 total_lines = sum(1 for _ in f)
-            with open(path, encoding="utf-8") as f:
+                f.seek(0)
                 for line in tqdm(f, desc=f"[Tokenize {i+1:02d}]", total=total_lines):
                     line = line.strip()
                     if not line:
                         continue
                     for tok in self.tokenize(line):
-                        if tok not in self.config["special_tokens"]:
+                        if tok not in self.config["special_tokens"] and tok not in self.config["global_tokens"]:
                             freq[tok] += 1
-        new = [t for t, c in freq.most_common() if c >= min_freq]
+
+        new_tokens = [t for t, c in freq.most_common() if c >= min_freq]
         avail = self.config["vocab_size"] - len(self.split_tokens)
-        for t in new[:avail]:
+        for t in new_tokens[:avail]:
             self.split_tokens[t] = len(self.split_tokens)
 
     def get_split_tokens(self):
@@ -280,7 +295,7 @@ class ChatDataset(Dataset):
         offset = self.offsets[idx]
         with open(self.path, "rb") as f:
             f.seek(offset)
-            line = f.readline().decode("utf-8").strip()
+            line = f.readline().decode("utf-8", errors="replace").strip()
         enc = self.tokenizer(line, self.max_len, update=False)
         ids = enc["input_ids"]
         return {"input_ids": ids[:-1], "attention_mask": enc["attention_mask"][:-1], "labels": ids[1:]}
@@ -288,7 +303,7 @@ class ChatDataset(Dataset):
 # ================================================
 
 class CustomLRScheduler:
-    def __init__(self, optimizer, base_lr=1e-4, gamma=0.7):
+    def __init__(self, optimizer, base_lr=1e-4, gamma=0.8):
         self.optimizer = optimizer
         self.base_lr = base_lr
         self.gamma = gamma
@@ -300,24 +315,26 @@ class CustomLRScheduler:
 
 # ================================================
 
-def run_epoch(model, data_loader, device, pad_id, epoch, optimizer=None):
-    total_loss, total_correct, total_tokens = 0.0, 0, 0
+def run_epoch(model, data_loader, device, pad_id, epoch, optimizer=None, scaler=None):
+    total_loss = 0.0
+    total_correct = 0
+    total_tokens = 0
+
     if optimizer is not None:
-        scaler = torch.amp.GradScaler()
-        optimizer.zero_grad(set_to_none=True)
         mode = "Train"
         lr = optimizer.param_groups[0]["lr"]
     else:
         mode = "Valid"
         lr = 0.0
+
     pbar = tqdm(data_loader, desc=f"[{mode} {epoch+1:02d}]", dynamic_ncols=True)
     for batch in pbar:
         batch = {k: v.to(device, non_blocking=True) for k, v in batch.items()}
+
         if optimizer is not None:
             with torch.amp.autocast(device_type="cuda"):
                 outputs = model(**batch)
-                loss = outputs["loss"]
-                loss = loss.mean()
+                loss = outputs["loss"].mean()
             scaler.scale(loss).backward()
             scaler.unscale_(optimizer)
             torch.nn.utils.clip_grad_norm_(model.parameters(), 1.0)
@@ -328,6 +345,7 @@ def run_epoch(model, data_loader, device, pad_id, epoch, optimizer=None):
             with torch.no_grad():
                 outputs = model(**batch)
                 loss = outputs["loss"]
+
         total_loss += loss.item()
         mask = batch["labels"] != pad_id
         correct = ((outputs["logits"].argmax(dim=-1) == batch["labels"]) & mask).sum().item()
@@ -335,7 +353,10 @@ def run_epoch(model, data_loader, device, pad_id, epoch, optimizer=None):
         total_tokens += mask.sum().item()
         acc = correct / mask.sum().item() if mask.sum().item() > 0 else 0.0
         pbar.set_postfix({"loss": f"{loss.item():.6f}", "acc": f"{acc:.6f}", "lr": f"{lr:.6f}"})
-    return total_loss / len(data_loader), total_correct / total_tokens if total_tokens > 0 else 0.0
+
+    avg_loss = total_loss / len(data_loader)
+    avg_acc = total_correct / total_tokens if total_tokens > 0 else 0.0
+    return avg_loss, avg_acc
 
 # ================================================
 
@@ -348,30 +369,35 @@ def stage_train(stages, config):
     model = ChatModel(config)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
-
     optimizer = Adam8bit(model.parameters(), lr=config["learning_rate"], weight_decay=config["weight_decay"], betas=config["betas_range"])
+    scheduler = CustomLRScheduler(optimizer, base_lr=config["learning_rate"], gamma=0.8)
+
     num_workers = min(8, os.cpu_count() or 1)
+    scaler = torch.amp.GradScaler()
+    global_epoch = 0
 
     for stage in stages:
         print(f"\n========== {stage['stage_name']} ==========\n")
         dataset = ChatDataset(tokenizer, stage["file_path"], config)
+
         indices = torch.randperm(len(dataset)).tolist()
         split_idx = int(len(dataset) * (1 - config["split_valid"]))
+        train_dataset = Subset(dataset, indices[:split_idx])
+        val_dataset = Subset(dataset, indices[split_idx:])
 
-        train_loader = DataLoader(Subset(dataset, indices[:split_idx]), batch_size=config["batch_size"],
-            num_workers=num_workers, persistent_workers=True, shuffle=True, pin_memory=True)
-        val_loader = DataLoader(Subset(dataset, indices[split_idx:]), batch_size=config["batch_size"],
-            num_workers=num_workers, persistent_workers=True, shuffle=False, pin_memory=True)
-        scheduler = CustomLRScheduler(optimizer, base_lr=config["learning_rate"], gamma=0.7)
+        train_loader = DataLoader(train_dataset, batch_size=config["batch_size"],
+            num_workers=num_workers, persistent_workers=(num_workers > 0), shuffle=True, pin_memory=True)
+        val_loader = DataLoader(val_dataset, batch_size=config["batch_size"],
+            num_workers=num_workers, persistent_workers=(num_workers > 0), shuffle=False, pin_memory=True)
 
-        for epoch in range(stage["epochs"]):
-            scheduler.step(epoch)
+        for _ in range(stage["epochs"]):
+            scheduler.step(global_epoch)
             model.train()
-            train_loss, train_acc = run_epoch(model, train_loader, device, pad_id, epoch, optimizer)
+            train_loss, train_acc = run_epoch(model, train_loader, device, pad_id, global_epoch, optimizer=optimizer, scaler=scaler)
             model.eval()
-            val_loss, val_acc = run_epoch(model, val_loader, device, pad_id, epoch)
+            val_loss, val_acc = run_epoch(model, val_loader, device, pad_id, global_epoch, optimizer=None, scaler=None)
 
-            save_path = os.path.join("./model", f"{stage['stage_name']}_epoch_{epoch+1}")
+            save_path = os.path.join("./model", f"{stage['stage_name']}_epoch_{global_epoch+1}")
             os.makedirs(save_path, exist_ok=True)
             with open(os.path.join(save_path, "tokenizer.json"), "w", encoding="utf-8") as f:
                 json.dump(tokenizer.get_split_tokens(), f, indent=4, ensure_ascii=False)
@@ -379,6 +405,8 @@ def stage_train(stages, config):
                 json.dump(config, f, indent=4, ensure_ascii=False)
             state = model.state_dict()
             save_file(state, os.path.join(save_path, "model.safetensors"))
+
+            global_epoch += 1
 
 # ================================================
 
