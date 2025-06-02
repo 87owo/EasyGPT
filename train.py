@@ -11,7 +11,7 @@ from tqdm import tqdm
 
 default_config = {
     "hidden_size": 512,
-    "ffn_hidden_size": 1024,
+    "ffn_hidden_size": 1536,
     "block_count": 12,
     "num_heads": 8,
     "num_kv_heads": 8,
