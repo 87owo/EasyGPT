@@ -321,7 +321,10 @@ def run_epoch(model, data_loader, device, pad_id, epoch, optimizer=None, scaler=
     total_tokens = 0
 
     mode = "Train" if optimizer is not None else "Valid"
-    lr = optimizer.param_groups[0]["lr"]
+    if optimizer is not None:
+        lr = optimizer.param_groups[0]["lr"]
+    else:
+        lr = 0.0
 
     pbar = tqdm(data_loader, desc=f"[{mode} {epoch+1:02d}]", dynamic_ncols=True)
     for batch in pbar:
@@ -411,5 +414,5 @@ if __name__ == "__main__":
     torch.backends.cuda.matmul.allow_tf32 = True
     stages = [
         {"stage_name": "Pre-training", "file_path": "./data/wiki_dataset_en_filter.txt", "epochs": 10},
-        {"stage_name": "Fine-tuning", "file_path": "./data/daily_dataset_en_filter.txt", "epochs": 5},]
+        {"stage_name": "Fine-tuning", "file_path": "./data/daily_dataset_en_filter.txt", "epochs": 10},]
     stage_train(stages, default_config)
