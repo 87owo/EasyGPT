@@ -38,6 +38,8 @@ default_config = {
         "<|function|>": 6,
         "<|end|>": 7,
         "\\n": 8,
+        "EasyGPT": 9,
+        "87owo": 10,
     }
 }
 
@@ -187,9 +189,9 @@ class ChatModel(nn.Module):
     def forward(self, input_ids, attention_mask=None, labels=None, pos_offset=0):
         B, T = input_ids.shape
         device = input_ids.device
-
         x = self.embed(input_ids)
         mask = self.get_mask(T, device)
+
         if attention_mask is not None:
             pad_mask = (attention_mask == 0).view(B, 1, 1, T)
             mask = mask | pad_mask
@@ -228,7 +230,11 @@ class ChatTokenizer:
         ids = []
         for t in tokens:
             if update and t not in self.split_tokens:
-                self.split_tokens[t] = len(self.split_tokens)
+                if len(self.split_tokens) < self.config["vocab_size"]:
+                    self.split_tokens[t] = len(self.split_tokens)
+                else:
+                    ids.append(unk)
+                    continue
             ids.append(self.split_tokens.get(t, unk))
         return ids
 
