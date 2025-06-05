@@ -76,7 +76,7 @@ def load_chat_model(model_dir, device):
 
 if __name__ == "__main__":
     print("EasyGPT Beta V1.4 Torch Inference (Dev)")
-    model_dir = "./model/Fine-tuning_10"
+    model_dir = "./model/Fine-tuning_epoch_10"
     device = torch.device("cpu") # ("cuda" if torch.cuda.is_available() else "cpu")
     model, tokenizer, config = load_chat_model(model_dir, device)
     while True:
