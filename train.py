@@ -310,7 +310,7 @@ class ChatDataset(Dataset):
 # ================================================
 
 class CustomLRScheduler:
-    def __init__(self, optimizer):
+    def __init__(self, optimizer, config):
         self.optimizer = optimizer
         self.base_lr = config["learning_rate"]
         self.gamma = config["learning_gamma"]
@@ -376,7 +376,7 @@ def stage_train(stages, config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     optimizer = Adam8bit(model.parameters(), lr=config["learning_rate"], weight_decay=config["weight_decay"], betas=config["betas_range"])
-    scheduler = CustomLRScheduler(optimizer)
+    scheduler = CustomLRScheduler(optimizer, config)
 
     num_workers = min(8, os.cpu_count() or 1)
     scaler = torch.amp.GradScaler()
