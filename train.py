@@ -24,6 +24,7 @@ default_config = {
     "weight_decay": 0.01,
     "dropout_rate": 0.1,
     "learning_rate": 1e-4,
+    "learning_gamma": 0.95,
     "betas_range": (0.9, 0.999),
     "layer_norm_eps": 1e-6,
     "global_tokens": {
@@ -309,10 +310,10 @@ class ChatDataset(Dataset):
 # ================================================
 
 class CustomLRScheduler:
-    def __init__(self, optimizer, base_lr=1e-4, gamma=0.8):
+    def __init__(self, optimizer, base_lr, gamma):
         self.optimizer = optimizer
-        self.base_lr = base_lr
-        self.gamma = gamma
+        self.base_lr = config["learning_rate"]
+        self.gamma = config["learning_gamma"]
 
     def step(self, epoch):
         new_lr = self.base_lr * (self.gamma ** epoch)
@@ -375,7 +376,7 @@ def stage_train(stages, config):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
     optimizer = Adam8bit(model.parameters(), lr=config["learning_rate"], weight_decay=config["weight_decay"], betas=config["betas_range"])
-    scheduler = CustomLRScheduler(optimizer, base_lr=config["learning_rate"], gamma=0.8)
+    scheduler = CustomLRScheduler(optimizer)
 
     num_workers = min(8, os.cpu_count() or 1)
     scaler = torch.amp.GradScaler()
