@@ -310,7 +310,7 @@ class ChatDataset(Dataset):
 # ================================================
 
 class CustomLRScheduler:
-    def __init__(self, optimizer, base_lr, gamma):
+    def __init__(self, optimizer):
         self.optimizer = optimizer
         self.base_lr = config["learning_rate"]
         self.gamma = config["learning_gamma"]
