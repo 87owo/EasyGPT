@@ -10,16 +10,16 @@ from tqdm import tqdm
 # ================================================
 
 default_config = {
-    "hidden_size": 512,
-    "ffn_hidden_size": 1536,
-    "block_count": 12,
-    "num_heads": 8,
-    "num_kv_heads": 8,
+    "hidden_size": 1024,
+    "ffn_hidden_size": 4096,
+    "block_count": 24,
+    "num_heads": 16,
+    "num_kv_heads": 1,
     "rope_dim": 64,
     "rope_base": 10000,
     "vocab_size": 32000,
-    "max_seq_length": 1024,
-    "batch_size": 4,
+    "max_seq_length": 512,
+    "batch_size": 2,
     "split_valid": 0.01,
     "weight_decay": 0.01,
     "dropout_rate": 0.1,
@@ -51,11 +51,13 @@ class RotaryEmbedding(nn.Module):
         super().__init__()
         inv_freq = 1.0 / (base ** (torch.arange(0, dim, 2).float() / dim))
         self.register_buffer("inv_freq", inv_freq)
+        self.rope_scale = nn.Parameter(torch.ones(1))
 
     def forward(self, seq_len, offset=0, device=None):
         pos = torch.arange(offset, offset + seq_len, device=device).type_as(self.inv_freq)
         freqs = torch.einsum("i,j->ij", pos, self.inv_freq)
         emb = torch.cat((freqs, freqs), dim=-1)
+        emb = emb * self.rope_scale
         cos = emb.cos()[None, :, :]
         sin = emb.sin()[None, :, :]
         return cos, sin
@@ -98,7 +100,10 @@ class SelfAttention(nn.Module):
         k = self.k_proj(x).view(B, T, self.num_kv_heads, self.head_dim).transpose(1, 2)
         v = self.v_proj(x).view(B, T, self.num_kv_heads, self.head_dim).transpose(1, 2)
 
-        if self.num_heads != self.num_kv_heads:
+        if self.num_kv_heads == 1:
+            k = k.repeat(1, self.num_heads, 1, 1)
+            v = v.repeat(1, self.num_heads, 1, 1)
+        elif self.num_kv_heads < self.num_heads:
             repeat = self.num_heads // self.num_kv_heads
             k = k.repeat_interleave(repeat, dim=1)
             v = v.repeat_interleave(repeat, dim=1)
@@ -145,7 +150,7 @@ class FeedForward(nn.Module):
     def forward(self, x):
         x_proj = self.in_proj(x)
         x1, x2 = x_proj.chunk(2, dim=-1)
-        x = F.gelu(x1) * x2
+        x = F.silu(x1) * x2
         x = self.up_proj(x)
         return self.dropout(x)
 
@@ -420,6 +425,6 @@ if __name__ == "__main__":
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
     stages = [
-        {"stage_name": "Pre-training", "file_path": "./data/wiki_dataset_en_filter.txt", "epochs": 10},
-        {"stage_name": "Fine-tuning", "file_path": "./data/daily_dataset_en_filter.txt", "epochs": 10},]
+        #{"stage_name": "Pre-training", "file_path": "./data/wiki_dataset_en_filter.txt", "epochs": 10},
+        {"stage_name": "Fine-tuning", "file_path": "./data/daily_dataset_en_filter.txt", "epochs": 20},]
     stage_train(stages, default_config)
