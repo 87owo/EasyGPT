@@ -333,10 +333,7 @@ def run_epoch(model, data_loader, device, pad_id, epoch, optimizer=None, scaler=
     total_tokens = 0
 
     mode = "Train" if optimizer is not None else "Valid"
-    if optimizer is not None:
-        lr = optimizer.param_groups[0]["lr"]
-    else:
-        lr = 0.0
+    lr = optimizer.param_groups[0]["lr"] if optimizer is not None else 0.0
 
     pbar = tqdm(data_loader, desc=f"[{mode} {epoch+1:02d}]", dynamic_ncols=True)
     for batch in pbar:
@@ -362,11 +359,11 @@ def run_epoch(model, data_loader, device, pad_id, epoch, optimizer=None, scaler=
         correct = ((outputs["logits"].argmax(dim=-1) == batch["labels"]) & mask).sum().item()
         total_correct += correct
         total_tokens += mask.sum().item()
-        acc = correct / mask.sum().item() if mask.sum().item() > 0 else 0.0
-        pbar.set_postfix({"loss": f"{loss.item():.6f}", "acc": f"{acc:.6f}", "lr": f"{lr:.6f}"})
+        avg_acc = total_correct / total_tokens if total_tokens > 0 else 0.0
+        pbar.set_postfix({"loss": f"{loss.item():.6f}", "acc":  f"{avg_acc:.6f}", "lr":   f"{lr:.6f}"})
 
     avg_loss = total_loss / len(data_loader)
-    avg_acc = total_correct / total_tokens if total_tokens > 0 else 0.0
+    avg_acc  = total_correct / total_tokens if total_tokens > 0 else 0.0
     return avg_loss, avg_acc
 
 # ================================================
