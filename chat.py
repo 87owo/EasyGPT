@@ -70,14 +70,18 @@ def load_chat_model(model_dir, device):
     state_dict = load_file(os.path.join(model_dir, "model.safetensors"))
     model.load_state_dict(state_dict)
     model.eval()
+
+    print("=" * 50)
+    total_params = sum(p.numel() for p in model.parameters())
+    print(f"Total parameters: {total_params:,}")
     return model, tokenizer, config
 
 # ================================================
 
 if __name__ == "__main__":
-    print("EasyGPT Beta V1.4 Torch Inference (Dev)")
+    print("EasyGPT Beta V1.5 Torch Inference (Dev)")
     model_dir = "./model/Fine-tuning_epoch_20"
-    device = torch.device("cpu") # ("cuda" if torch.cuda.is_available() else "cpu")
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, tokenizer, config = load_chat_model(model_dir, device)
     while True:
         print("=" * 50)
