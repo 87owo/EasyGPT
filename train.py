@@ -3,7 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset, DataLoader, Subset
 from safetensors.torch import save_file
-from bitsandbytes.optim import Adam8bit
+from bitsandbytes.optim import AdamW8bit
 from collections import Counter, OrderedDict
 from tqdm import tqdm
 
@@ -21,11 +21,9 @@ default_config = {
     "max_seq_length": 512,
     "batch_size": 2,
     "split_valid": 0.01,
-    "weight_decay": 0.01,
     "dropout_rate": 0.1,
     "learning_rate": 1e-4,
     "learning_gamma": 0.95,
-    "betas_range": (0.9, 0.999),
     "layer_norm_eps": 1e-6,
     "global_tokens": {
         "<|padding|>": 0,
@@ -61,6 +59,11 @@ class RotaryEmbedding(nn.Module):
         cos = emb.cos()[None, :, :]
         sin = emb.sin()[None, :, :]
         return cos, sin
+
+def rotate_half(x):
+    x1 = x[..., ::2]
+    x2 = x[..., 1::2]
+    return torch.cat([-x2, x1], dim=-1)
 
 # ================================================
 
@@ -130,11 +133,6 @@ class SelfAttention(nn.Module):
         attn_probs = self.dropout(attn_probs)
         out = torch.matmul(attn_probs, v).transpose(1, 2).reshape(B, T, -1)
         return self.o_proj(out)
-
-def rotate_half(x):
-    x1 = x[..., ::2]
-    x2 = x[..., 1::2]
-    return torch.cat([-x2, x1], dim=-1)
 
 # ================================================
 
@@ -377,9 +375,8 @@ def stage_train(stages, config):
     model = ChatModel(config)
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model.to(device)
-    optimizer = Adam8bit(model.parameters(), lr=config["learning_rate"], weight_decay=config["weight_decay"], betas=config["betas_range"])
+    optimizer = AdamW8bit(model.parameters(), lr=config["learning_rate"])
     scheduler = CustomLRScheduler(optimizer, config)
-
     num_workers = min(8, os.cpu_count() or 1)
     scaler = torch.amp.GradScaler()
     global_epoch = 0
@@ -422,6 +419,5 @@ if __name__ == "__main__":
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
     stages = [
-        #{"stage_name": "Pre-training", "file_path": "./data/wiki_dataset_en_filter.txt", "epochs": 10},
         {"stage_name": "Fine-tuning", "file_path": "./data/daily_dataset_en_filter.txt", "epochs": 20},]
     stage_train(stages, default_config)
