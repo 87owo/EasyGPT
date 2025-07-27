@@ -32,15 +32,11 @@ EasyGPT/
 
 ## Dataset Example
 
-https://github.com/87owo/EasyGPT/releases
-
 ```
 <|user|>Hello!<|assistant|>Hello! I am EasyGPT, an AI assistant. How can I help you?<|end|>
 ```
 
-## Official Website
-
-https://github.com/87owo/EasyGPT
+Download: https://github.com/87owo/EasyGPT/releases
 
 ## MIT license
 
