@@ -37,6 +37,7 @@ Dataset Example Download: https://github.com/87owo/EasyGPT/releases
 ```
 <|user|>Hello!<|assistant|>Hello! I am EasyGPT, an AI assistant. How can I help you?<|end|>
 <|user|>Can you introduce yourself?<|assistant|>Sure! I am EasyGPT, an AI assistant.<|end|>
+...
 ```
 
 ## Model Config
@@ -45,8 +46,9 @@ Dataset Example Download: https://github.com/87owo/EasyGPT/releases
 
 | Params | hidden_size | ffn_hidden_size | block_count | num_heads | vocab_size | batch_size |
 |--------|-------------|-----------------|-------------|-----------|------------|------------|
-| 400M   | 1024        | 4096            | 24          | 16        | 32000      | 2          |
-| 70M    | 512         | 2048            | 12          | 8         | 32000      | 8          |
+| 421M   | 1024        | 4096            | 24          | 16        | 32000      | 2          |
+| 182M   | 768         | 3072            | 16          | 12        | 32000      | 4          |
+| 77M    | 512         | 2048            | 12          | 8         | 32000      | 8          |
 
 ## Official Website
 
