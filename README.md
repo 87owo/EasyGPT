@@ -15,12 +15,6 @@ pip install torch
 pip install tqdm
 ```
 
-## Dataset Format
-
-```
-<|user|>Hello!<|assistant|>Hello! I am EasyGPT, an AI assistant. How can I help you?<|end|>
-```
-
 ## File Information
 
 ```
@@ -34,6 +28,12 @@ EasyGPT/
 ├── train.py (Model training complete code)
 ├── chat.py (Model dialogue complete code)
 └── ...
+```
+
+## Dataset Format
+
+```
+<|user|>Hello!<|assistant|>Hello! I am EasyGPT, an AI assistant. How can I help you?<|end|>
 ```
 
 ## Train Dataset
