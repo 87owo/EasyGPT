@@ -15,12 +15,18 @@ pip install torch
 pip install tqdm
 ```
 
+## Dataset Format
+
+```
+<|user|>Hello!<|assistant|>Hello! I am EasyGPT, an AI assistant. How can I help you?<|end|>
+```
+
 ## File Information
 
 ```
 EasyGPT/
 ├── data/ 
-│   └── dialogues.txt (Training format example)
+│   └── dataset.txt (Training format example)
 │
 ├── model/ 
 │   └── ... (Model training save location)
