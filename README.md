@@ -32,17 +32,16 @@ EasyGPT/
 
 ## Dataset Format
 
+Dataset Example Download: https://github.com/87owo/EasyGPT/releases
+
 ```
 <|user|>Hello!<|assistant|>Hello! I am EasyGPT, an AI assistant. How can I help you?<|end|>
+<|user|>Can you introduce yourself?<|assistant|>Sure! I am EasyGPT, an AI assistant.<|end|>
 ```
-
-## Dataset Example
-
-https://github.com/87owo/EasyGPT/releases
 
 ## Model Config
 
-8GB gpu memory configuration, if you have more gpu memory, you can increase batch_size appropriately.
+8GB gpu memory configuration, if you have more gpu memory, you can increase batch_size appropriately
 
 | Params | hidden_size | ffn_hidden_size | block_count | num_heads | vocab_size | batch_size |
 |--------|-------------|-----------------|-------------|-----------|------------|------------|
