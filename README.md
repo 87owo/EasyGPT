@@ -36,7 +36,7 @@ EasyGPT/
 <|user|>Hello!<|assistant|>Hello! I am EasyGPT, an AI assistant. How can I help you?<|end|>
 ```
 
-## Train Dataset
+## Dataset Example
 
 https://github.com/87owo/EasyGPT/releases
 
