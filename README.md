@@ -30,13 +30,19 @@ EasyGPT/
 └── ...
 ```
 
-## Dataset Example
+## Dataset Format
 
 ```
 <|user|>Hello!<|assistant|>Hello! I am EasyGPT, an AI assistant. How can I help you?<|end|>
 ```
 
-Download: https://github.com/87owo/EasyGPT/releases
+## Dataset Example
+
+https://github.com/87owo/EasyGPT/releases
+
+## Official Website
+
+https://github.com/87owo/EasyGPT
 
 ## MIT license
 
