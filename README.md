@@ -37,7 +37,7 @@ Dataset Example Download: https://github.com/87owo/EasyGPT/releases
 ```
 <|user|>Hello!<|assistant|>Hello! I am EasyGPT, an AI assistant. How can I help you?<|end|>
 <|user|>Can you introduce yourself?<|assistant|>Sure! I am EasyGPT, an AI assistant.<|end|>
-...
+<|user|>Who are you?<|assistant|>Hello, My name is EasyGPT, an AI training by 87owo.<|end|>
 ```
 
 ## Model Config
