@@ -44,10 +44,10 @@ https://github.com/87owo/EasyGPT/releases
 
 Optimal model size configuration table for 8GB memory
 
-| Model Name | params | hidden_size | ffn_hidden_size | block_count | num_heads | vocab_size | batch_size |
-|------------|--------|-------------|-----------------|-------------|-----------|------------|------------|
-| EasyGPT-M  | 400M   | 1024        | 4096            | 24          | 16        | 32000      | 2          |
-| EasyGPT-S  | 70M    | 512         | 2048            | 12          | 8         | 32000      | 8          |
+| Model   | Params | hidden_size | ffn_hidden_size | block_count | num_heads | vocab_size | batch_size |
+|---------|--------|-------------|-----------------|-------------|-----------|------------|------------|
+| EasyGPT | 400M   | 1024        | 4096            | 24          | 16        | 32000      | 2          |
+| EasyGPT | 70M    | 512         | 2048            | 12          | 8         | 32000      | 8          |
 
 ## Official Website
 
