@@ -53,6 +53,6 @@ Dataset Example Download: https://github.com/87owo/EasyGPT/releases
 
 https://github.com/87owo/EasyGPT
 
-## Code License
+## Project License
 
 https://github.com/87owo/EasyGPT/blob/main/LICENSE.md
