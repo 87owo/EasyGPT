@@ -21,11 +21,14 @@ The following lists the storage locations of all relevant code and other related
 
 ```
 EasyGPT/
-├── data/              # Training text dataset
-├── model/             # Model training save location
+├── data/                # Training text dataset
 │
-├── train.py           # Model training complete code
-├── chat.py            # Model dialogue complete code
+├── model/
+│   ├── stage_epoch_*/   # Model training save location
+│   └── ...
+│
+├── train.py             # Model training complete code
+├── chat.py              # Model dialogue complete code
 └── ...
 ```
 
