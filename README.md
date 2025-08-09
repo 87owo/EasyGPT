@@ -2,7 +2,7 @@
 
 Easily train and inference on your personal computer, no need for large scale clusters!
 
-It is recommended to have at least 10,000 pieces of training data and 10 training rounds.
+<img width="1395" height="643" alt="image" src="https://github.com/user-attachments/assets/d64d5f8d-eb55-4a6a-aa45-26ddf71e0f6d" />
 
 ## Requirements
 
