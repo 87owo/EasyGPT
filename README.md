@@ -2,7 +2,7 @@
 
 Easily train and inference on your personal computer, no need for large scale clusters!
 
-<img width="1395" height="643" alt="image" src="https://github.com/user-attachments/assets/d64d5f8d-eb55-4a6a-aa45-26ddf71e0f6d" />
+![Train_UI](https://github.com/user-attachments/assets/d64d5f8d-eb55-4a6a-aa45-26ddf71e0f6d)
 
 ## Requirements
 
@@ -19,14 +19,11 @@ pip install tqdm
 
 ```
 EasyGPT/
-├── data/ 
-│   └── dataset.txt (Training format example)
+├── data/              # Training text dataset
+├── model/             # Model training save location
 │
-├── model/ 
-│   └── ... (Model training save location)
-│
-├── train.py (Model training complete code)
-├── chat.py (Model dialogue complete code)
+├── train.py           # Model training complete code
+├── chat.py            # Model dialogue complete code
 └── ...
 ```
 
@@ -54,6 +51,6 @@ Dataset Example Download: https://github.com/87owo/EasyGPT/releases
 
 https://github.com/87owo/EasyGPT
 
-## MIT license
+## Code License
 
-https://github.com/87owo/EasyGPT/blob/main/LICENSE
+https://github.com/87owo/EasyGPT/blob/main/LICENSE.md
