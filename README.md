@@ -17,6 +17,8 @@ pip install tqdm
 
 ## File Information
 
+The following lists the storage locations of all relevant code and other related documents.
+
 ```
 EasyGPT/
 ├── data/              # Training text dataset
