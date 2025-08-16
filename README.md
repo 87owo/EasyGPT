@@ -2,7 +2,7 @@
 
 Easily train and inference on your personal computer, no need for large scale clusters!
 
-<img width="1397" height="703" alt="Train_UI" src="https://github.com/user-attachments/assets/3a72feac-7665-41d3-8367-8449d05eae24" />
+<img width="1397" height="703" alt="image" src="https://github.com/user-attachments/assets/718aed82-5a84-4d39-ad4d-eb8b2fb031e8" />
 
 ## Requirements
 
