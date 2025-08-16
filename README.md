@@ -32,6 +32,10 @@ EasyGPT/
 └── ...                      # Other supplementary folders and files
 ```
 
+## Chat With EasyGPT
+
+<img width="1396" height="538" alt="image" src="https://github.com/user-attachments/assets/5b0850fa-a1e2-48ff-aa82-c6153bd899c7" />
+
 ## Dataset Format
 
 Dataset Example Download: https://github.com/87owo/EasyGPT/releases
