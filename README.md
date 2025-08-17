@@ -36,7 +36,7 @@ EasyGPT/
 
 Conversation records of the EasyGPT chat model trained for 12 epochs
 
-<img width="1793" height="780" alt="image" src="https://github.com/user-attachments/assets/84d3442c-c39d-4220-a5f6-d51dcfb6e52d" />
+<img width="2125" height="994" alt="image" src="https://github.com/user-attachments/assets/7da6d05d-47ad-47f2-86e0-068f6652d06b" />
 
 ## Dataset Format
 
