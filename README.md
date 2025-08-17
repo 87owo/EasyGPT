@@ -32,7 +32,7 @@ EasyGPT/
 └── ...                      # Other supplementary folders and files
 ```
 
-## Chat With EasyGPT
+## Chat EasyGPT
 
 Conversation records of the EasyGPT chat model trained for 12 epochs
 
