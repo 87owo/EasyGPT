@@ -1,6 +1,10 @@
 import os, json, torch
 from safetensors.torch import load_file
 from train import *
+from collections import OrderedDict
+from colorama import init as colorama_init, Fore, Style
+
+colorama_init(autoreset=True)
 
 # ================================================
 
@@ -20,14 +24,15 @@ def sample_next_token(logits, generated_tokens, repetition_penalty, presence_pen
 
 # ================================================
 
-def generate_response(model, tokenizer, prompt, device, config, max_length=1024, temperature=0.7, repetition_penalty=1.0, presence_penalty=-1.0):
+def generate_response(model, tokenizer, prompt, device, config, max_length=512, temperature=0.3, repetition_penalty=1.0, presence_penalty=-1.5):
     encoded = tokenizer(f"<|user|>{prompt}<|assistant|>", update=False)
     generated = encoded["input_ids"].unsqueeze(0).to(device)
     unknown_id = tokenizer.split_tokens.get("<|unknown|>")
     end_id = tokenizer.split_tokens.get("<|end|>")
     newline_id = tokenizer.split_tokens.get("\\n")
 
-    print("Assistant: ", end="", flush=True)
+    print(Fore.GREEN + "Assistant:" + Style.RESET_ALL, end=" ", flush=True)
+
     with torch.no_grad():
         for _ in range(max_length):
             if generated.size(1) > config["max_seq_length"]:
@@ -80,12 +85,12 @@ def load_chat_model(model_dir, device):
 
 if __name__ == "__main__":
     print("EasyGPT Beta V1.5 Torch Inference (Dev)")
-    model_dir = "./model/Fine-tuning_epoch_20"
+    model_dir = "./model/Fine-tuning_epoch_12"
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model, tokenizer, config = load_chat_model(model_dir, device)
     while True:
         print("=" * 50)
-        prompt = input("User: ")
+        prompt = input(Fore.CYAN + "User:" + Style.RESET_ALL + " ")
         if prompt.strip().lower() in ["exit", "quit"]:
             break
         generate_response(model, tokenizer, prompt, device, config)
