@@ -60,7 +60,7 @@ Dataset Example Download: https://github.com/87owo/EasyGPT/releases
 
 ## Official Website
 
-https://github.com/87owo/EasyGPT
+Open Source Website : https://github.com/87owo/EasyGPT
 
 ## Project License
 
