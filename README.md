@@ -64,4 +64,6 @@ https://github.com/87owo/EasyGPT
 
 ## Project License
 
+Please read the Project License. If you would like to apply, please submit your application to Github issues.
+
 https://github.com/87owo/EasyGPT/blob/main/LICENSE.md
