@@ -419,5 +419,5 @@ if __name__ == "__main__":
     torch.backends.cudnn.benchmark = True
     torch.backends.cuda.matmul.allow_tf32 = True
     stages = [
-        {"stage_name": "Fine-tuning", "file_path": "./data/daily_dataset_en_filter.txt", "epochs": 20},]
+        {"stage_name": "Fine-tuning", "file_path": "./data/daily_dataset_en_filter.txt", "epochs": 15},]
     stage_train(stages, default_config)
